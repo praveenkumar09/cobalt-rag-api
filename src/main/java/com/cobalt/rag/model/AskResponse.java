@@ -4,8 +4,9 @@ import java.util.List;
 
 public record AskResponse(
         String answer,
-        List<String> sources,
-        List<String> graphContext,
-        int chunksRetrieved
+        List<SourceCitation> sources,
+        List<GraphRelationship> graphContext,
+        int chunksRetrieved,
+        List<String> followUpQuestions
 ) {
 }

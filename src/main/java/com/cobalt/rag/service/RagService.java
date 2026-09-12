@@ -2,6 +2,9 @@ package com.cobalt.rag.service;
 
 import com.cobalt.rag.model.AskResponse;
 import com.cobalt.rag.model.ChunkResult;
+import com.cobalt.rag.model.GraphRelationship;
+import com.cobalt.rag.model.SourceCitation;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -24,8 +27,20 @@ public class RagService {
     private final ChatModel chatModel;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    // Canned fallback answer the LLM is instructed to return verbatim for off-topic
+    // or unsupported-by-context questions. Used to detect that case after the LLM
+    // responds, so citations can be suppressed for exactly the responses where the
+    // model itself decided the retrieved context didn't actually answer the question.
+    private static final String OUT_OF_SCOPE_MESSAGE =
+            "I'm COBOL AI, specialized in analyzing life insurance COBOL/AS400 mainframe " +
+            "codebases. I can answer questions about policy processing logic, surrender and " +
+            "withdrawal flows, GIRO and premium collection, claims handling, fund management, " +
+            "and the underlying COBOL programs that implement these processes. Your question " +
+            "appears to be outside this domain — could you rephrase it in the context of " +
+            "the life insurance codebase?";
+
     // ── System Prompt ──────────────────────────────────────────────────────────
-    private static final String SYSTEM_PROMPT = """
+    private static final String SYSTEM_PROMPT = ("""
             You are COBOL AI, an expert AS400/COBOL mainframe code analyst specializing \
             in life insurance system analysis and modernization. You have deep knowledge of \
             both mainframe COBOL/JCL programming and life insurance business processes.
@@ -141,12 +156,22 @@ public class RagService {
             COBOL/AS400 mainframe systems, JCL, or the codebase being analyzed, respond \
             with exactly this message and nothing else:
 
-            "I'm COBOL AI, specialized in analyzing life insurance COBOL/AS400 mainframe \
-            codebases. I can answer questions about policy processing logic, surrender and \
-            withdrawal flows, GIRO and premium collection, claims handling, fund management, \
-            and the underlying COBOL programs that implement these processes. Your question \
-            appears to be outside this domain — could you rephrase it in the context of \
-            the life insurance codebase?"
+            "%s"
+            """).formatted(OUT_OF_SCOPE_MESSAGE);
+
+    // ── Follow-up suggestion prompt ───────────────────────────────────────────
+    private static final String FOLLOWUP_SYSTEM_PROMPT = """
+            You generate follow-up questions for a COBOL/AS400 mainframe code assistant chat.
+            Given the user's question, the assistant's answer, and the retrieved code context, \
+            suggest exactly 3 concise, specific follow-up questions the user would plausibly ask \
+            next. Ground each suggestion in program names, paragraphs, files, or business terms \
+            that actually appear in the answer or context — never invent a program/section name \
+            that wasn't mentioned. Do not repeat or rephrase the original question. Keep each \
+            under 12 words.
+
+            Respond with ONLY a JSON array of exactly 3 strings, no markdown fences, no commentary. \
+            Example:
+            ["How does PREMCOL validate the policy number?", "What happens if GIRO collection fails twice?", "Which programs call SURRPGM?"]
             """;
 
     // Stopwords filtered out before sending keywords to the graph search
@@ -179,7 +204,7 @@ public class RagService {
         List<String> keywords = extractKeywords(question);
 
         // 3. Graph search — find program relationships in Neo4j
-        List<String> graphContext = graphSearch.findRelationships(programIds, keywords);
+        List<GraphRelationship> graphContext = graphSearch.findRelationships(programIds, keywords);
 
         // 4. Build augmented context block (vector + graph)
         String contextBlock = buildContextBlock(chunks, graphContext);
@@ -200,14 +225,13 @@ public class RagService {
         );
 
         String answer = response.getResult().getOutput().getText();
+        boolean outOfScope = isOutOfScope(answer);
 
-        List<String> sources = chunks.stream()
-                .map(ChunkResult::sourceFile)
-                .filter(s -> s != null && !s.isBlank())
-                .distinct()
-                .toList();
+        List<SourceCitation> sources = outOfScope ? List.of() : toCitations(chunks);
+        List<GraphRelationship> visibleGraphContext = outOfScope ? List.of() : graphContext;
+        List<String> followUps = outOfScope ? List.of() : generateFollowUps(question, answer, contextBlock);
 
-        return new AskResponse(answer, sources, graphContext, chunks.size());
+        return new AskResponse(answer, sources, visibleGraphContext, chunks.size(), followUps);
     }
 
     /**
@@ -226,19 +250,16 @@ public class RagService {
                 .distinct()
                 .toList();
 
-        List<String> graphContext = graphSearch.findRelationships(programIds, extractKeywords(question));
+        List<GraphRelationship> graphContext = graphSearch.findRelationships(programIds, extractKeywords(question));
 
-        List<String> sources = chunks.stream()
-                .map(ChunkResult::sourceFile)
-                .filter(s -> s != null && !s.isBlank())
-                .distinct()
-                .toList();
+        List<SourceCitation> sources = toCitations(chunks);
+        String contextBlock = buildContextBlock(chunks, graphContext);
 
         String userMessage = """
                 %s
 
                 Question: %s
-                """.formatted(buildContextBlock(chunks, graphContext), question);
+                """.formatted(contextBlock, question);
 
         // Event 1: metadata (sources + graph context arrive before the first token)
         Flux<String> metaFlux = Flux.just(toJson(Map.of(
@@ -249,6 +270,7 @@ public class RagService {
         )));
 
         // Events 2..N: streamed LLM tokens
+        StringBuilder fullAnswer = new StringBuilder();
         Flux<String> tokenFlux = chatModel.stream(
                 new Prompt(List.of(
                         new SystemMessage(SYSTEM_PROMPT),
@@ -258,21 +280,111 @@ public class RagService {
         .mapNotNull(resp -> {
             String text = resp.getResult().getOutput().getText();
             if (text == null || text.isEmpty()) return null;
+            fullAnswer.append(text);
             Map<String, String> payload = new LinkedHashMap<>();
             payload.put("type", "token");
             payload.put("content", text);
             return toJson(payload);
         });
 
+        // Event N+1: correction — only sent if the fully-streamed answer turned out to
+        // be the out-of-scope fallback, which isn't known until every token has arrived.
+        // Retracts any citations and graph relationships sent in the metadata event so
+        // off-topic answers never display sources or key relationships, even though
+        // retrieval necessarily ran before the LLM call.
+        Flux<String> correctionFlux = Flux.defer(() -> {
+            boolean hasSomethingToRetract = !sources.isEmpty() || !graphContext.isEmpty();
+            if (!hasSomethingToRetract || !isOutOfScope(fullAnswer.toString())) {
+                return Flux.empty();
+            }
+            return Flux.just(toJson(Map.of("type", "correction", "sources", List.of(), "graphContext", List.of())));
+        });
+
+        // Event N+2: follow-up suggestions — generated only after the full answer is
+        // known, and skipped entirely for an out-of-scope answer.
+        Flux<String> followupFlux = Flux.defer(() -> {
+            String answer = fullAnswer.toString();
+            if (isOutOfScope(answer)) {
+                return Flux.empty();
+            }
+            List<String> followUps = generateFollowUps(question, answer, contextBlock);
+            if (followUps.isEmpty()) {
+                return Flux.empty();
+            }
+            return Flux.just(toJson(Map.of("type", "followups", "questions", followUps)));
+        });
+
         // Final event: done signal
         Flux<String> doneFlux = Flux.just("[DONE]");
 
-        return Flux.concat(metaFlux, tokenFlux, doneFlux);
+        return Flux.concat(metaFlux, tokenFlux, correctionFlux, followupFlux, doneFlux);
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
 
-    private String buildContextBlock(List<ChunkResult> chunks, List<String> graphContext) {
+    private boolean isOutOfScope(String answer) {
+        return answer != null && answer.trim().equals(OUT_OF_SCOPE_MESSAGE.trim());
+    }
+
+    private List<String> generateFollowUps(String question, String answer, String contextBlock) {
+        try {
+            String userMessage = """
+                    Original question: %s
+
+                    Assistant's answer:
+                    %s
+
+                    Retrieved context:
+                    %s
+                    """.formatted(question, answer, contextBlock);
+
+            var response = chatModel.call(
+                    new Prompt(List.of(
+                            new SystemMessage(FOLLOWUP_SYSTEM_PROMPT),
+                            new UserMessage(userMessage)
+                    ))
+            );
+
+            String text = response.getResult().getOutput().getText();
+            String json = extractJsonArray(text);
+            List<String> followUps = objectMapper.readValue(json, new TypeReference<List<String>>() {});
+
+            return followUps.stream()
+                    .filter(q -> q != null && !q.isBlank())
+                    .limit(3)
+                    .toList();
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
+    private String extractJsonArray(String text) {
+        if (text == null) return "[]";
+        int start = text.indexOf('[');
+        int end = text.lastIndexOf(']');
+        if (start == -1 || end == -1 || end < start) return "[]";
+        return text.substring(start, end + 1);
+    }
+
+    private List<SourceCitation> toCitations(List<ChunkResult> chunks) {
+        return chunks.stream()
+                .filter(c -> c.sourceFile() != null && !c.sourceFile().isBlank())
+                .map(c -> new SourceCitation(
+                        c.chunkId(),
+                        c.sourceFile(),
+                        c.programId(),
+                        c.sectionName(),
+                        c.sectionPurpose(),
+                        c.lineStart(),
+                        c.lineEnd(),
+                        c.fileType(),
+                        Math.round(c.similarity() * 100.0) / 100.0,
+                        c.content()
+                ))
+                .toList();
+    }
+
+    private String buildContextBlock(List<ChunkResult> chunks, List<GraphRelationship> graphContext) {
         StringBuilder sb = new StringBuilder();
 
         sb.append("=== RETRIEVED CODE CHUNKS (Vector Search) ===\n");
@@ -297,7 +409,9 @@ public class RagService {
         if (graphContext.isEmpty()) {
             sb.append("No graph relationships found.\n");
         } else {
-            graphContext.forEach(rel -> sb.append("  ").append(rel).append("\n"));
+            graphContext.forEach(rel -> sb.append("  ")
+                    .append(rel.fromLabel()).append(" -[").append(rel.relType()).append("]-> ")
+                    .append(rel.toLabel()).append("\n"));
         }
 
         return sb.toString();

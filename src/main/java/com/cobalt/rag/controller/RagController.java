@@ -31,10 +31,14 @@ public class RagController {
      *
      * SSE event stream format:
      *
-     *   data: {"type":"metadata","sources":["GIROPGM.cbl"],"graphContext":["GIROPGM -[CALLS]-> PREMCOL"],"chunksRetrieved":5}
+     *   data: {"type":"metadata","sources":[{"chunkId":"...","sourceFile":"GIROPGM.cbl","programId":"GIROPGM","sectionName":"2100-VALIDATE-GIRO","sectionPurpose":"...","lineStart":210,"lineEnd":268,"fileType":"cbl","similarity":0.62,"snippet":"..."}],"graphContext":[{"fromId":"GIROPGM","fromLabel":"GIROPGM","fromType":"COBOL_PROGRAM","relType":"CALLS","toId":"PREMCOL","toLabel":"PREMCOL","toType":"COBOL_PROGRAM"}],"chunksRetrieved":5}
      *
      *   data: {"type":"token","content":"The GIRO "}
      *   data: {"type":"token","content":"processing program handles..."}
+     *
+     *   data: {"type":"correction","sources":[]}   (only sent if the answer turned out to be out-of-scope)
+     *
+     *   data: {"type":"followups","questions":["How does PREMCOL validate the policy number?","..."]}
      *
      *   data: [DONE]
      */
@@ -61,10 +65,38 @@ public class RagController {
      * Response:
      *   {
      *     "answer": "The GIRO processing program...",
-     *     "sources": ["GIROPGM.cbl"],
-     *     "graphContext": ["GIROPGM -[CALLS]-> PREMCOL"],
-     *     "chunksRetrieved": 5
+     *     "sources": [
+     *       {
+     *         "chunkId": "GIROPGM.cbl#2100-VALIDATE-GIRO",
+     *         "sourceFile": "GIROPGM.cbl",
+     *         "programId": "GIROPGM",
+     *         "sectionName": "2100-VALIDATE-GIRO",
+     *         "sectionPurpose": "Validates GIRO collection rejection codes before re-presentment.",
+     *         "lineStart": 210,
+     *         "lineEnd": 268,
+     *         "fileType": "cbl",
+     *         "similarity": 0.62,
+     *         "snippet": "2100-VALIDATE-GIRO.\n    IF WS-REJECT-CODE = 'R01' ..."
+     *       }
+     *     ],
+     *     "graphContext": [
+     *       {
+     *         "fromId": "GIROPGM", "fromLabel": "GIROPGM", "fromType": "COBOL_PROGRAM",
+     *         "relType": "CALLS",
+     *         "toId": "PREMCOL", "toLabel": "PREMCOL", "toType": "COBOL_PROGRAM"
+     *       }
+     *     ],
+     *     "chunksRetrieved": 5,
+     *     "followUpQuestions": [
+     *       "How does PREMCOL validate the policy number?",
+     *       "What happens if GIRO collection fails twice?",
+     *       "Which programs call SURRPGM?"
+     *     ]
      *   }
+     *
+     * Chunks scoring below cobalt.rag.similarity-threshold are dropped entirely, so an
+     * off-topic question naturally yields an empty "sources" array and no follow-up
+     * suggestions.
      */
     @PostMapping(value = "/ask/formal", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<AskResponse> askFormal(@RequestBody AskRequest request) {

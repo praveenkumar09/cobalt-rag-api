@@ -10,6 +10,8 @@ public record ChunkResult(
         String sectionPurpose,
         String content,
         String fileType,
+        Integer lineStart,
+        Integer lineEnd,
         double similarity
 ) {
 }

@@ -1,5 +1,6 @@
 package com.cobalt.rag.service;
 
+import com.cobalt.rag.model.GraphRelationship;
 import org.neo4j.driver.Driver;
 import org.neo4j.driver.Session;
 import org.springframework.beans.factory.annotation.Value;
@@ -21,9 +22,9 @@ public class GraphSearchService {
     private static final String PROGRAM_RELS_QUERY = """
             MATCH (n)-[r]->(m)
             WHERE n.id IN $ids
-            RETURN n.id AS fromId, n.label AS fromLabel,
+            RETURN n.id AS fromId, n.label AS fromLabel, labels(n)[0] AS fromType,
                    type(r) AS relType,
-                   m.id AS toId, m.label AS toLabel
+                   m.id AS toId, m.label AS toLabel, labels(m)[0] AS toType
             LIMIT $limit
             """;
 
@@ -33,9 +34,9 @@ public class GraphSearchService {
             WHERE any(kw IN $keywords WHERE
                       toLower(n.label) CONTAINS toLower(kw)
                    OR toLower(n.id)    CONTAINS toLower(kw))
-            RETURN n.id AS fromId, n.label AS fromLabel,
+            RETURN n.id AS fromId, n.label AS fromLabel, labels(n)[0] AS fromType,
                    type(r) AS relType,
-                   m.id AS toId, m.label AS toLabel
+                   m.id AS toId, m.label AS toLabel, labels(m)[0] AS toType
             LIMIT $limit
             """;
 
@@ -43,8 +44,8 @@ public class GraphSearchService {
         this.driver = driver;
     }
 
-    public List<String> findRelationships(List<String> programIds, List<String> keywords) {
-        List<String> results = new ArrayList<>();
+    public List<GraphRelationship> findRelationships(List<String> programIds, List<String> keywords) {
+        List<GraphRelationship> results = new ArrayList<>();
         try (Session session = driver.session()) {
             if (!programIds.isEmpty()) {
                 session.run(PROGRAM_RELS_QUERY, Map.of("ids", programIds, "limit", limit))
@@ -58,17 +59,21 @@ public class GraphSearchService {
             }
         } catch (Exception ex) {
             // Graph context is best-effort; do not fail the whole request
-            results.add("(Graph context unavailable: " + ex.getMessage() + ")");
+            return List.of();
         }
         return results.stream().distinct().toList();
     }
 
-    private void addRelationship(List<String> results, org.neo4j.driver.Record record) {
-        String from = record.get("fromLabel").asString("");
-        String rel  = record.get("relType").asString("");
-        String to   = record.get("toLabel").asString("");
-        if (!from.isBlank() && !to.isBlank()) {
-            results.add(from + " -[" + rel + "]-> " + to);
+    private void addRelationship(List<GraphRelationship> results, org.neo4j.driver.Record record) {
+        String fromId = record.get("fromId").asString("");
+        String fromLabel = record.get("fromLabel").asString("");
+        String fromType = record.get("fromType").asString("");
+        String relType = record.get("relType").asString("");
+        String toId = record.get("toId").asString("");
+        String toLabel = record.get("toLabel").asString("");
+        String toType = record.get("toType").asString("");
+        if (!fromLabel.isBlank() && !toLabel.isBlank()) {
+            results.add(new GraphRelationship(fromId, fromLabel, fromType, relType, toId, toLabel, toType));
         }
     }
 }
