@@ -2,7 +2,9 @@ package com.cobalt.rag.service;
 
 import com.cobalt.rag.model.AskResponse;
 import com.cobalt.rag.model.ChunkResult;
+import com.cobalt.rag.model.CorpusSample;
 import com.cobalt.rag.model.GraphRelationship;
+import com.cobalt.rag.model.ImpactAnalysis;
 import com.cobalt.rag.model.SourceCitation;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -10,6 +12,8 @@ import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 
@@ -17,6 +21,7 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
 @Service
@@ -24,6 +29,7 @@ public class RagService {
 
     private final VectorSearchService vectorSearch;
     private final GraphSearchService graphSearch;
+    private final ImpactAnalysisService impactAnalysisService;
     private final ChatModel chatModel;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -174,6 +180,29 @@ public class RagService {
             ["How does PREMCOL validate the policy number?", "What happens if GIRO collection fails twice?", "Which programs call SURRPGM?"]
             """;
 
+    // ── Starter-suggestion prompt (home-screen chips) ─────────────────────────
+    private static final String STARTER_SUGGESTIONS_SYSTEM_PROMPT = """
+            You generate example starter questions shown on the home screen of a COBOL/AS400 \
+            mainframe code assistant chat, before any conversation has started. Given a random \
+            sample of programs and sections actually present in the ingested codebase, suggest \
+            exactly 3 concise, inviting questions a first-time user might ask to explore what \
+            this assistant can do. Ground every suggestion in a real program, section, or domain \
+            name from the sample — never invent one that wasn't given. Keep each under 14 words.
+
+            Respond with ONLY a JSON array of exactly 3 strings, no markdown fences, no commentary.
+            """;
+
+    // In-memory cache for the starter suggestions — the underlying codebase only
+    // changes on re-ingestion, so there's no need to call the LLM on every home
+    // screen load. Stale-while-revalidate: once the TTL lapses, callers still get
+    // the (stale) cached list immediately, while a single background refresh
+    // brings it current for next time — nobody blocks on the LLM call except the
+    // very first request ever (before the startup warm-up has had a chance to run).
+    private static final long SUGGESTIONS_TTL_MS = 30 * 60 * 1000;
+    private volatile List<String> cachedSuggestions = List.of();
+    private volatile long suggestionsCachedAt = 0;
+    private final AtomicBoolean suggestionsRefreshing = new AtomicBoolean(false);
+
     // Stopwords filtered out before sending keywords to the graph search
     private static final Pattern STOPWORD = Pattern.compile(
             "\\b(what|does|do|the|a|an|is|are|how|which|where|when|who|why|and|or|in|" +
@@ -182,11 +211,22 @@ public class RagService {
             Pattern.CASE_INSENSITIVE
     );
 
+    // Impact analysis runs the extra Neo4j traversal only for questions that
+    // actually sound like a change request — an ordinary "what does this do"
+    // question has nothing to compute change order for.
+    private static final Pattern CHANGE_REQUEST_WORD = Pattern.compile(
+            "\\b(change|modify|update|add|remove|delete|refactor|rename|replace|" +
+            "alter|extend|impact|migrate|fix)\\b",
+            Pattern.CASE_INSENSITIVE
+    );
+
     public RagService(VectorSearchService vectorSearch,
                       GraphSearchService graphSearch,
+                      ImpactAnalysisService impactAnalysisService,
                       ChatModel chatModel) {
         this.vectorSearch = vectorSearch;
         this.graphSearch  = graphSearch;
+        this.impactAnalysisService = impactAnalysisService;
         this.chatModel    = chatModel;
     }
 
@@ -205,6 +245,11 @@ public class RagService {
 
         // 3. Graph search — find program relationships in Neo4j
         List<GraphRelationship> graphContext = graphSearch.findRelationships(programIds, keywords);
+
+        // 3b. Impact analysis — only for questions that sound like a change request
+        ImpactAnalysis impactAnalysis = looksLikeChangeRequest(question)
+                ? impactAnalysisService.analyze(programIds)
+                : null;
 
         // 4. Build augmented context block (vector + graph)
         String contextBlock = buildContextBlock(chunks, graphContext);
@@ -230,8 +275,9 @@ public class RagService {
         List<SourceCitation> sources = outOfScope ? List.of() : toCitations(chunks);
         List<GraphRelationship> visibleGraphContext = outOfScope ? List.of() : graphContext;
         List<String> followUps = outOfScope ? List.of() : generateFollowUps(question, answer, contextBlock);
+        ImpactAnalysis visibleImpact = outOfScope ? null : impactAnalysis;
 
-        return new AskResponse(answer, sources, visibleGraphContext, chunks.size(), followUps);
+        return new AskResponse(answer, sources, visibleGraphContext, chunks.size(), followUps, visibleImpact);
     }
 
     /**
@@ -252,6 +298,10 @@ public class RagService {
 
         List<GraphRelationship> graphContext = graphSearch.findRelationships(programIds, extractKeywords(question));
 
+        ImpactAnalysis impactAnalysis = looksLikeChangeRequest(question)
+                ? impactAnalysisService.analyze(programIds)
+                : null;
+
         List<SourceCitation> sources = toCitations(chunks);
         String contextBlock = buildContextBlock(chunks, graphContext);
 
@@ -262,12 +312,15 @@ public class RagService {
                 """.formatted(contextBlock, question);
 
         // Event 1: metadata (sources + graph context arrive before the first token)
-        Flux<String> metaFlux = Flux.just(toJson(Map.of(
-                "type", "metadata",
-                "sources", sources,
-                "graphContext", graphContext,
-                "chunksRetrieved", chunks.size()
-        )));
+        Map<String, Object> metaPayload = new LinkedHashMap<>();
+        metaPayload.put("type", "metadata");
+        metaPayload.put("sources", sources);
+        metaPayload.put("graphContext", graphContext);
+        metaPayload.put("chunksRetrieved", chunks.size());
+        if (impactAnalysis != null) {
+            metaPayload.put("impactAnalysis", impactAnalysis);
+        }
+        Flux<String> metaFlux = Flux.just(toJson(metaPayload));
 
         // Events 2..N: streamed LLM tokens
         StringBuilder fullAnswer = new StringBuilder();
@@ -293,11 +346,16 @@ public class RagService {
         // off-topic answers never display sources or key relationships, even though
         // retrieval necessarily ran before the LLM call.
         Flux<String> correctionFlux = Flux.defer(() -> {
-            boolean hasSomethingToRetract = !sources.isEmpty() || !graphContext.isEmpty();
+            boolean hasSomethingToRetract = !sources.isEmpty() || !graphContext.isEmpty() || impactAnalysis != null;
             if (!hasSomethingToRetract || !isOutOfScope(fullAnswer.toString())) {
                 return Flux.empty();
             }
-            return Flux.just(toJson(Map.of("type", "correction", "sources", List.of(), "graphContext", List.of())));
+            Map<String, Object> correction = new LinkedHashMap<>();
+            correction.put("type", "correction");
+            correction.put("sources", List.of());
+            correction.put("graphContext", List.of());
+            correction.put("impactAnalysis", null);
+            return Flux.just(toJson(correction));
         });
 
         // Event N+2: follow-up suggestions — generated only after the full answer is
@@ -320,10 +378,110 @@ public class RagService {
         return Flux.concat(metaFlux, tokenFlux, correctionFlux, followupFlux, doneFlux);
     }
 
+    /**
+     * Fires once the app is accepting traffic, so the very first real request
+     * for starter suggestions never has to wait on a live LLM call — by the
+     * time anyone reaches the home screen, the cache is (almost always)
+     * already warm.
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    public void warmSuggestionsCache() {
+        triggerBackgroundRefresh();
+    }
+
+    /**
+     * Home-screen starter question suggestions, generated from a random sample of
+     * whatever codebase is actually ingested right now — never hardcoded, so they
+     * can't drift out of sync with the loaded corpus.
+     *
+     * Stale-while-revalidate: once {@link #SUGGESTIONS_TTL_MS} lapses, this still
+     * returns the cached list immediately and kicks off a single background
+     * refresh for next time, rather than making the caller wait on the LLM. Only
+     * the very first call ever (before {@link #warmSuggestionsCache()} has had a
+     * chance to complete) blocks on a live generation.
+     */
+    public List<String> getStarterSuggestions() {
+        List<String> cached = cachedSuggestions;
+        if (cached.isEmpty()) {
+            return refreshSuggestionsSync();
+        }
+        if (System.currentTimeMillis() - suggestionsCachedAt >= SUGGESTIONS_TTL_MS) {
+            triggerBackgroundRefresh();
+        }
+        return cached;
+    }
+
+    private void triggerBackgroundRefresh() {
+        if (suggestionsRefreshing.compareAndSet(false, true)) {
+            Thread.ofVirtual().start(() -> {
+                try {
+                    refreshSuggestionsSync();
+                } finally {
+                    suggestionsRefreshing.set(false);
+                }
+            });
+        }
+    }
+
+    private List<String> refreshSuggestionsSync() {
+        List<String> generated = generateStarterSuggestions();
+        if (!generated.isEmpty()) {
+            cachedSuggestions = generated;
+            suggestionsCachedAt = System.currentTimeMillis();
+        }
+        return generated;
+    }
+
+    private List<String> generateStarterSuggestions() {
+        try {
+            List<CorpusSample> samples = vectorSearch.sampleForSuggestions(20);
+            if (samples.isEmpty()) {
+                return List.of();
+            }
+
+            StringBuilder sb = new StringBuilder();
+            samples.forEach(s -> sb
+                    .append("- Program: ").append(safe(s.programId()))
+                    .append(" | Domain: ").append(safe(s.domain())).append("/").append(safe(s.subDomain()))
+                    .append(" | Section: ").append(safe(s.sectionName()))
+                    .append(" | Purpose: ").append(safe(s.sectionPurpose()))
+                    .append("\n"));
+
+            String userMessage = """
+                    Here is a random sample of programs and sections actually present in the codebase:
+
+                    %s
+                    Suggest exactly 3 example starter questions grounded in the sample above.
+                    """.formatted(sb);
+
+            var response = chatModel.call(
+                    new Prompt(List.of(
+                            new SystemMessage(STARTER_SUGGESTIONS_SYSTEM_PROMPT),
+                            new UserMessage(userMessage)
+                    ))
+            );
+
+            String text = response.getResult().getOutput().getText();
+            String json = extractJsonArray(text);
+            List<String> suggestions = objectMapper.readValue(json, new TypeReference<List<String>>() {});
+
+            return suggestions.stream()
+                    .filter(q -> q != null && !q.isBlank())
+                    .limit(3)
+                    .toList();
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     private boolean isOutOfScope(String answer) {
         return answer != null && answer.trim().equals(OUT_OF_SCOPE_MESSAGE.trim());
+    }
+
+    private boolean looksLikeChangeRequest(String question) {
+        return question != null && CHANGE_REQUEST_WORD.matcher(question).find();
     }
 
     private List<String> generateFollowUps(String question, String answer, String contextBlock) {

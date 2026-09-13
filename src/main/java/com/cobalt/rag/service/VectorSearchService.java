@@ -1,6 +1,7 @@
 package com.cobalt.rag.service;
 
 import com.cobalt.rag.model.ChunkResult;
+import com.cobalt.rag.model.CorpusSample;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -36,6 +37,17 @@ public class VectorSearchService {
             LIMIT ?
             """;
 
+    // Random sample of real, already-ingested programs/sections — used to ground
+    // the home-screen starter-question suggestions in whatever codebase is
+    // actually loaded, instead of a hardcoded example that can drift out of sync.
+    private static final String SAMPLE_SQL = """
+            SELECT program_id, domain, sub_domain, section_name, section_purpose
+            FROM chunks
+            WHERE should_embed = true AND section_purpose IS NOT NULL AND section_purpose <> ''
+            ORDER BY random()
+            LIMIT ?
+            """;
+
     public VectorSearchService(JdbcTemplate jdbc, EmbeddingModel embeddingModel) {
         this.jdbc = jdbc;
         this.embeddingModel = embeddingModel;
@@ -67,6 +79,20 @@ public class VectorSearchService {
         return results.stream()
                 .filter(c -> c.similarity() >= similarityThreshold)
                 .toList();
+    }
+
+    public List<CorpusSample> sampleForSuggestions(int limit) {
+        return jdbc.query(
+                SAMPLE_SQL,
+                (rs, rowNum) -> new CorpusSample(
+                        rs.getString("program_id"),
+                        rs.getString("domain"),
+                        rs.getString("sub_domain"),
+                        rs.getString("section_name"),
+                        rs.getString("section_purpose")
+                ),
+                limit
+        );
     }
 
     private static Integer nullableInt(ResultSet rs, String column) throws SQLException {

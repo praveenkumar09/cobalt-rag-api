@@ -7,6 +7,7 @@ public record AskResponse(
         List<SourceCitation> sources,
         List<GraphRelationship> graphContext,
         int chunksRetrieved,
-        List<String> followUpQuestions
+        List<String> followUpQuestions,
+        ImpactAnalysis impactAnalysis
 ) {
 }

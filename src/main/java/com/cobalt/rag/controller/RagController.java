@@ -2,6 +2,7 @@ package com.cobalt.rag.controller;
 
 import com.cobalt.rag.model.AskRequest;
 import com.cobalt.rag.model.AskResponse;
+import com.cobalt.rag.model.SuggestionsResponse;
 import com.cobalt.rag.service.RagService;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -104,6 +105,22 @@ public class RagController {
             return ResponseEntity.badRequest().build();
         }
         return ResponseEntity.ok(ragService.ask(request.question().trim()));
+    }
+
+    /**
+     * GET /api/suggestions  — home-screen starter question chips
+     *
+     * Generated from a random sample of whatever codebase is actually ingested
+     * right now (see {@link RagService#getStarterSuggestions()}), never hardcoded,
+     * so these can't drift out of sync with the loaded corpus. Cached server-side
+     * for 30 minutes.
+     *
+     * Response:
+     *   { "suggestions": ["What does CBTRN02C do when a transaction fails validation?", "...", "..."] }
+     */
+    @GetMapping(value = "/suggestions", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<SuggestionsResponse> suggestions() {
+        return ResponseEntity.ok(new SuggestionsResponse(ragService.getStarterSuggestions()));
     }
 
     @GetMapping("/health")
