@@ -9,8 +9,10 @@ public record AskResponse(
         int chunksRetrieved,
         List<String> followUpQuestions,
         ImpactAnalysis impactAnalysis,
-        List<String> businessRules,
+        List<BusinessRule> businessRules,
         List<DecisionTableRow> decisionTable,
-        BusinessFlow businessFlow
+        BusinessFlow businessFlow,
+        List<DataDictionaryEntry> dataDictionary,
+        List<TechnicalRule> technicalRules
 ) {
 }

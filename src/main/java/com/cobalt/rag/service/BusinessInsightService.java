@@ -2,9 +2,13 @@ package com.cobalt.rag.service;
 
 import com.cobalt.rag.model.BusinessFlow;
 import com.cobalt.rag.model.BusinessFlowEdge;
+import com.cobalt.rag.model.BusinessRule;
+import com.cobalt.rag.model.ChunkResult;
+import com.cobalt.rag.model.DataDictionaryEntry;
 import com.cobalt.rag.model.DecisionTableRow;
 import com.cobalt.rag.model.DomainTag;
 import com.cobalt.rag.model.GraphRelationship;
+import com.cobalt.rag.model.TechnicalRule;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.ai.chat.messages.SystemMessage;
@@ -18,52 +22,127 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
- * Business-audience counterparts to the technical view: business rules and a
- * decision table extracted from the retrieved code (grounded, same trust tier
- * as the answer text itself), and a business-activity relabeling of the
- * technical call-graph. The graph's topology is always derived deterministically
- * from real Neo4j edges plus real domain/sub-domain ingestion tags — an LLM may
- * only polish the connecting wording, and only after its output is validated
- * against the original edges, so it can never introduce a flow that doesn't
- * actually exist in the system.
+ * Business- and technical-audience insight generators layered on top of the
+ * retrieved code (grounded, same trust tier as the answer text itself):
+ * business rules, a decision table, a data dictionary, a technical (COBOL-term)
+ * restatement of the same rule logic for developers, and a business-activity
+ * relabeling of the technical call-graph. The graph's topology is always
+ * derived deterministically from real Neo4j edges plus real domain/sub-domain
+ * ingestion tags — an LLM may only polish the connecting wording, and only
+ * after its output is validated against the original edges, so it can never
+ * introduce a flow that doesn't actually exist in the system.
  */
 @Service
 public class BusinessInsightService {
 
-    private static final String BUSINESS_RULES_SYSTEM_PROMPT = """
-            You explain COBOL business logic to non-technical business stakeholders.
-            Given the retrieved code context, extract every distinct business rule \
-            actually implemented in this code — plain business language only, no code, \
-            no COBOL terms, no field names, no program names. Each rule should read like \
-            a policy statement a business analyst would write, e.g. "A policyholder cannot \
-            request a partial withdrawal within the first 12 months of the policy."
-
-            Only state rules clearly grounded in the given code — if the code has no \
-            discernible business rule (e.g. it is purely technical plumbing), respond with \
-            an empty array. Return at most 6 rules.
-
-            Respond with ONLY a JSON array of strings, no markdown fences, no commentary.
+    private static final String RELEVANCE_GATE = """
+            First, judge whether the ORIGINAL QUESTION is actually asking about business \
+            logic or decision behavior at all. Many questions are purely structural or \
+            relational instead — e.g. "what programs use/call/reference X", "where is X \
+            defined", "which files does X read or write", "list the fields in X" — and have \
+            NO business rule or decision to extract, even though the retrieved code (e.g. a \
+            copybook's field/status definitions) may itself describe things that sound \
+            rule-like. For a structural/relational question like that, respond with an empty \
+            array — do not extract unrelated rules just because the surrounding code happens \
+            to define some. Only extract when the question or answer is actually about what \
+            the system decides, permits, rejects, or requires.
             """;
 
-    private static final String DECISION_TABLE_SYSTEM_PROMPT = """
+    private static final String CHUNK_REFERENCE_INSTRUCTION = """
+            Each retrieved chunk in the context below is preceded by a line "Chunk ID: <id>". \
+            For every item you return, include the exact Chunk ID (copied verbatim, exactly as \
+            written) of the ONE chunk that most directly grounds that specific item. If no \
+            single chunk clearly grounds it, set chunkId to null — never invent an id or guess \
+            one that doesn't appear in the context.
+            """;
+
+    private static final String BUSINESS_RULES_SYSTEM_PROMPT = ("""
+            You explain COBOL business logic to non-technical business stakeholders.
+            You are given the user's ORIGINAL QUESTION, the assistant's ANSWER, and the \
+            retrieved code that grounded that answer.
+
+            %s
+            When there genuinely is a relevant rule, state it in plain business language only \
+            — no code, no COBOL terms, no field names, no program names — like a policy \
+            statement a business analyst would write, e.g. "A policyholder cannot request a \
+            partial withdrawal within the first 12 months of the policy." Ground every rule in \
+            what the question/answer is actually about, not just anything findable in the raw \
+            retrieved code. Return at most 6 rules.
+
+            %s
+            Respond with ONLY a JSON array of objects with exactly these two keys, no markdown \
+            fences, no commentary. Example:
+            [{"rule":"A partial withdrawal cannot be made within the first 12 months of the policy.","chunkId":"POLWD01C.cbl#2100-CHECK-ELIGIBILITY"}]
+            """).formatted(RELEVANCE_GATE, CHUNK_REFERENCE_INSTRUCTION);
+
+    private static final String TECHNICAL_RULES_SYSTEM_PROMPT = ("""
+            You restate COBOL decision logic for developers — the same kind of rule a \
+            business rule would describe, but in technical terms: exact COBOL field names, \
+            condition-names, paragraph names, and literal values as they appear in the code, \
+            not a business paraphrase. You are given the user's ORIGINAL QUESTION, the \
+            assistant's ANSWER, and the retrieved code that grounded that answer.
+
+            %s
+            When there genuinely is a relevant rule, reference the actual field/paragraph \
+            names and literals involved, e.g. "When CLM-APPROVED-AMT is less than or equal to \
+            WS-AUTO-APPROVE-LIMIT, CLM-CLAIM-STATUS is set to 'A' and the approved-claims \
+            counter is incremented." Return at most 8 rules.
+
+            %s
+            Respond with ONLY a JSON array of objects with exactly these two keys, no markdown \
+            fences, no commentary. Example:
+            [{"rule":"When WS-POLICY-YEARS is less than 2, SURR-REQUEST-STATUS is set to 'REJECTED'.","chunkId":"SURRPGM.cbl#2200-VALIDATE-SURRENDER"}]
+            """).formatted(RELEVANCE_GATE, CHUNK_REFERENCE_INSTRUCTION);
+
+    private static final String DECISION_TABLE_SYSTEM_PROMPT = ("""
             You convert COBOL conditional logic (IF/EVALUATE/condition-name checks) into a \
-            business decision table. Given the retrieved code context, extract each distinct \
-            decision point as one row with:
+            business decision table. You are given the user's ORIGINAL QUESTION, the \
+            assistant's ANSWER, and the retrieved code that grounded that answer.
+
+            %s
+            When there genuinely are relevant decisions, extract each distinct decision point \
+            as one row with:
              - "condition": the business condition in plain language (not COBOL syntax)
              - "outcome": what happens when the condition is met, in plain business language
              - "exception": any special/error case tied to this condition, in plain business \
                language, or null if there is none
 
-            Only include decisions clearly grounded in the given code. If there is no real \
-            conditional/decision logic in the context, respond with an empty array. Return at \
-            most 8 rows.
+            %s
+            Return at most 8 rows. Respond with ONLY a JSON array of objects with exactly \
+            these four keys, no markdown fences, no commentary. Example:
+            [{"condition":"Policy is less than 2 years old","outcome":"Surrender request is rejected","exception":"Hardship waiver code on file allows early surrender","chunkId":"SURRPGM.cbl#2200-VALIDATE-SURRENDER"}]
+            """).formatted(RELEVANCE_GATE, CHUNK_REFERENCE_INSTRUCTION);
 
-            Respond with ONLY a JSON array of objects with exactly these three keys, no \
-            markdown fences, no commentary. Example:
-            [{"condition":"Policy is less than 2 years old","outcome":"Surrender request is rejected","exception":"Hardship waiver code on file allows early surrender"}]
-            """;
+    private static final String DATA_DICTIONARY_SYSTEM_PROMPT = ("""
+            You build a business data dictionary from COBOL data definitions (copybook \
+            fields, record layouts, working-storage items). You are given the user's \
+            ORIGINAL QUESTION, the assistant's ANSWER, and the retrieved code that grounded \
+            that answer.
+
+            Extract a data-dictionary entry for each distinct data element that is central to \
+            what the question is actually about — e.g. the fields of a specific copybook or \
+            record the question concerns. Unlike a business rule, a data dictionary is \
+            relevant even for structural questions (e.g. "what programs use copybook X" or \
+            "what fields does X have" both warrant one) — only return an empty array when the \
+            question has NO specific data element/record/copybook in focus at all (e.g. it's \
+            purely about which programs call which, with no record layout involved).
+
+            For each relevant entry, provide:
+             - "term": a short business-friendly name for the field (e.g. "Claim Amount")
+             - "technicalName": the COBOL field name exactly as it appears in the code \
+               (e.g. "CLM-AMOUNT"), or null if it doesn't correspond to one single named field
+             - "description": what the field represents and how it's used, in plain business \
+               language
+
+            %s
+            Return at most 10 entries. Respond with ONLY a JSON array of objects with exactly \
+            these four keys, no markdown fences, no commentary. Example:
+            [{"term":"Claim Amount","technicalName":"CLM-AMOUNT","description":"The total monetary amount being claimed for a specific incident.","chunkId":"CLMREC.cpy#01-CLAIM-RECORD"}]
+            """).formatted(CHUNK_REFERENCE_INSTRUCTION);
 
     private static final String FLOW_POLISH_SYSTEM_PROMPT = """
             You are given the EXACT, real business-activity flow of a system, as a JSON array \
@@ -104,21 +183,48 @@ public class BusinessInsightService {
         this.chatModel = chatModel;
     }
 
-    public List<String> extractBusinessRules(String question, String answer, String contextBlock) {
+    public List<BusinessRule> extractBusinessRules(String question, String answer, String contextBlock,
+                                                     List<ChunkResult> chunks) {
         try {
+            Set<String> validChunkIds = chunks.stream().map(ChunkResult::chunkId).collect(Collectors.toSet());
             String userMessage = buildExtractionUserMessage(question, answer, contextBlock);
             var response = chatModel.call(new Prompt(List.of(
                     new SystemMessage(BUSINESS_RULES_SYSTEM_PROMPT), new UserMessage(userMessage))));
             String json = extractJsonArray(response.getResult().getOutput().getText());
-            List<String> rules = objectMapper.readValue(json, new TypeReference<List<String>>() {});
-            return rules.stream().filter(r -> r != null && !r.isBlank()).limit(6).toList();
+            List<BusinessRule> rules = objectMapper.readValue(json, new TypeReference<List<BusinessRule>>() {});
+            return rules.stream()
+                    .filter(r -> r != null && r.rule() != null && !r.rule().isBlank())
+                    .map(r -> validChunkIds.contains(r.chunkId()) ? r : new BusinessRule(r.rule(), null))
+                    .limit(6)
+                    .toList();
         } catch (Exception e) {
             return List.of();
         }
     }
 
-    public List<DecisionTableRow> extractDecisionTable(String question, String answer, String contextBlock) {
+    public List<TechnicalRule> extractTechnicalRules(String question, String answer, String contextBlock,
+                                                       List<ChunkResult> chunks) {
         try {
+            Set<String> validChunkIds = chunks.stream().map(ChunkResult::chunkId).collect(Collectors.toSet());
+            String userMessage = buildExtractionUserMessage(question, answer, contextBlock);
+            var response = chatModel.call(new Prompt(List.of(
+                    new SystemMessage(TECHNICAL_RULES_SYSTEM_PROMPT), new UserMessage(userMessage))));
+            String json = extractJsonArray(response.getResult().getOutput().getText());
+            List<TechnicalRule> rules = objectMapper.readValue(json, new TypeReference<List<TechnicalRule>>() {});
+            return rules.stream()
+                    .filter(r -> r != null && r.rule() != null && !r.rule().isBlank())
+                    .map(r -> validChunkIds.contains(r.chunkId()) ? r : new TechnicalRule(r.rule(), null))
+                    .limit(8)
+                    .toList();
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
+    public List<DecisionTableRow> extractDecisionTable(String question, String answer, String contextBlock,
+                                                         List<ChunkResult> chunks) {
+        try {
+            Set<String> validChunkIds = chunks.stream().map(ChunkResult::chunkId).collect(Collectors.toSet());
             String userMessage = buildExtractionUserMessage(question, answer, contextBlock);
             var response = chatModel.call(new Prompt(List.of(
                     new SystemMessage(DECISION_TABLE_SYSTEM_PROMPT), new UserMessage(userMessage))));
@@ -126,7 +232,29 @@ public class BusinessInsightService {
             List<DecisionTableRow> rows = objectMapper.readValue(json, new TypeReference<List<DecisionTableRow>>() {});
             return rows.stream()
                     .filter(r -> r != null && r.condition() != null && !r.condition().isBlank())
+                    .map(r -> validChunkIds.contains(r.chunkId()) ? r
+                            : new DecisionTableRow(r.condition(), r.outcome(), r.exception(), null))
                     .limit(8)
+                    .toList();
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
+    public List<DataDictionaryEntry> extractDataDictionary(String question, String answer, String contextBlock,
+                                                             List<ChunkResult> chunks) {
+        try {
+            Set<String> validChunkIds = chunks.stream().map(ChunkResult::chunkId).collect(Collectors.toSet());
+            String userMessage = buildExtractionUserMessage(question, answer, contextBlock);
+            var response = chatModel.call(new Prompt(List.of(
+                    new SystemMessage(DATA_DICTIONARY_SYSTEM_PROMPT), new UserMessage(userMessage))));
+            String json = extractJsonArray(response.getResult().getOutput().getText());
+            List<DataDictionaryEntry> entries = objectMapper.readValue(json, new TypeReference<List<DataDictionaryEntry>>() {});
+            return entries.stream()
+                    .filter(e -> e != null && e.term() != null && !e.term().isBlank())
+                    .map(e -> validChunkIds.contains(e.chunkId()) ? e
+                            : new DataDictionaryEntry(e.term(), e.technicalName(), e.description(), null))
+                    .limit(10)
                     .toList();
         } catch (Exception e) {
             return List.of();
