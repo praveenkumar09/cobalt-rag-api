@@ -8,6 +8,9 @@ public record AskResponse(
         List<GraphRelationship> graphContext,
         int chunksRetrieved,
         List<String> followUpQuestions,
-        ImpactAnalysis impactAnalysis
+        ImpactAnalysis impactAnalysis,
+        List<String> businessRules,
+        List<DecisionTableRow> decisionTable,
+        BusinessFlow businessFlow
 ) {
 }

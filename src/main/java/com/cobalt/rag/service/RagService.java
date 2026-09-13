@@ -1,8 +1,10 @@
 package com.cobalt.rag.service;
 
 import com.cobalt.rag.model.AskResponse;
+import com.cobalt.rag.model.BusinessFlow;
 import com.cobalt.rag.model.ChunkResult;
 import com.cobalt.rag.model.CorpusSample;
+import com.cobalt.rag.model.DecisionTableRow;
 import com.cobalt.rag.model.GraphRelationship;
 import com.cobalt.rag.model.ImpactAnalysis;
 import com.cobalt.rag.model.SourceCitation;
@@ -16,11 +18,18 @@ import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
@@ -30,6 +39,7 @@ public class RagService {
     private final VectorSearchService vectorSearch;
     private final GraphSearchService graphSearch;
     private final ImpactAnalysisService impactAnalysisService;
+    private final BusinessInsightService businessInsightService;
     private final ChatModel chatModel;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -223,10 +233,12 @@ public class RagService {
     public RagService(VectorSearchService vectorSearch,
                       GraphSearchService graphSearch,
                       ImpactAnalysisService impactAnalysisService,
+                      BusinessInsightService businessInsightService,
                       ChatModel chatModel) {
         this.vectorSearch = vectorSearch;
         this.graphSearch  = graphSearch;
         this.impactAnalysisService = impactAnalysisService;
+        this.businessInsightService = businessInsightService;
         this.chatModel    = chatModel;
     }
 
@@ -277,7 +289,34 @@ public class RagService {
         List<String> followUps = outOfScope ? List.of() : generateFollowUps(question, answer, contextBlock);
         ImpactAnalysis visibleImpact = outOfScope ? null : impactAnalysis;
 
-        return new AskResponse(answer, sources, visibleGraphContext, chunks.size(), followUps, visibleImpact);
+        // businessRules/decisionTable/businessFlow are three independent LLM/DB
+        // calls with no dependency on each other — run them concurrently (virtual
+        // threads, same idiom already used for the suggestions background refresh)
+        // instead of paying their latency one after another.
+        List<String> businessRules = List.of();
+        List<DecisionTableRow> decisionTable = List.of();
+        BusinessFlow businessFlow = null;
+        if (!outOfScope) {
+            try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                Future<List<String>> rulesFuture = executor.submit(
+                        () -> businessInsightService.extractBusinessRules(question, answer, contextBlock));
+                Future<List<DecisionTableRow>> tableFuture = executor.submit(
+                        () -> businessInsightService.extractDecisionTable(question, answer, contextBlock));
+                Future<BusinessFlow> flowFuture = executor.submit(
+                        () -> businessInsightService.buildBusinessFlow(graphContext));
+
+                businessRules = rulesFuture.get();
+                decisionTable = tableFuture.get();
+                businessFlow = flowFuture.get();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (ExecutionException e) {
+                // Each task is already best-effort/self-catching; this is just a safety net.
+            }
+        }
+
+        return new AskResponse(answer, sources, visibleGraphContext, chunks.size(), followUps, visibleImpact,
+                businessRules, decisionTable, businessFlow);
     }
 
     /**
@@ -301,6 +340,20 @@ public class RagService {
         ImpactAnalysis impactAnalysis = looksLikeChangeRequest(question)
                 ? impactAnalysisService.analyze(programIds)
                 : null;
+
+        // Business flow depends only on graphContext (not the answer text), so it can
+        // start right away and run concurrently with the main answer's token stream —
+        // by the time anything downstream actually asks for it, it's often already
+        // done, hiding its latency (including its own LLM polish call) almost entirely.
+        // .cache() means whichever subscriber asks for it later (or first, if it's
+        // already finished) just reads the one computed result.
+        Mono<String> businessFlowMono = Mono.fromCallable(() -> {
+                    BusinessFlow flow = businessInsightService.buildBusinessFlow(graphContext);
+                    return flow == null ? null : toJson(Map.of("type", "businessFlow", "flow", flow));
+                })
+                .subscribeOn(Schedulers.boundedElastic())
+                .cache();
+        businessFlowMono.subscribe(); // fire-and-forget: start the background work now
 
         List<SourceCitation> sources = toCitations(chunks);
         String contextBlock = buildContextBlock(chunks, graphContext);
@@ -355,27 +408,52 @@ public class RagService {
             correction.put("sources", List.of());
             correction.put("graphContext", List.of());
             correction.put("impactAnalysis", null);
+            correction.put("businessRules", List.of());
+            correction.put("decisionTable", List.of());
+            correction.put("businessFlow", null);
             return Flux.just(toJson(correction));
         });
 
-        // Event N+2: follow-up suggestions — generated only after the full answer is
-        // known, and skipped entirely for an out-of-scope answer.
-        Flux<String> followupFlux = Flux.defer(() -> {
+        // Events N+2..4: follow-ups + business rules + decision table — three
+        // independent LLM calls, all grounded in the full answer, none depending on
+        // the others' output. Run them concurrently (each offloaded to boundedElastic,
+        // Reactor's idiom for wrapping a blocking call) and merge as each completes,
+        // rather than paying their latency one after another.
+        Flux<String> postAnswerInsightsFlux = Flux.defer(() -> {
             String answer = fullAnswer.toString();
             if (isOutOfScope(answer)) {
                 return Flux.empty();
             }
-            List<String> followUps = generateFollowUps(question, answer, contextBlock);
-            if (followUps.isEmpty()) {
-                return Flux.empty();
-            }
-            return Flux.just(toJson(Map.of("type", "followups", "questions", followUps)));
+
+            Mono<String> followupMono = Mono.fromCallable(() -> {
+                List<String> followUps = generateFollowUps(question, answer, contextBlock);
+                return followUps.isEmpty() ? null : toJson(Map.of("type", "followups", "questions", followUps));
+            }).subscribeOn(Schedulers.boundedElastic());
+
+            Mono<String> businessRulesMono = Mono.fromCallable(() -> {
+                List<String> rules = businessInsightService.extractBusinessRules(question, answer, contextBlock);
+                return rules.isEmpty() ? null : toJson(Map.of("type", "businessRules", "rules", rules));
+            }).subscribeOn(Schedulers.boundedElastic());
+
+            Mono<String> decisionTableMono = Mono.fromCallable(() -> {
+                List<DecisionTableRow> rows = businessInsightService.extractDecisionTable(question, answer, contextBlock);
+                return rows.isEmpty() ? null : toJson(Map.of("type", "decisionTable", "rows", rows));
+            }).subscribeOn(Schedulers.boundedElastic());
+
+            return Flux.merge(followupMono, businessRulesMono, decisionTableMono).filter(Objects::nonNull);
         });
+
+        // Event N+5: business flow — taps the mono kicked off back when graphContext
+        // was first computed, so this is often instant by the time we get here.
+        Flux<String> businessFlowFlux = Flux.defer(() -> isOutOfScope(fullAnswer.toString())
+                ? Flux.empty()
+                : businessFlowMono.flux().filter(Objects::nonNull));
 
         // Final event: done signal
         Flux<String> doneFlux = Flux.just("[DONE]");
 
-        return Flux.concat(metaFlux, tokenFlux, correctionFlux, followupFlux, doneFlux);
+        return Flux.concat(metaFlux, tokenFlux, correctionFlux,
+                postAnswerInsightsFlux, businessFlowFlux, doneFlux);
     }
 
     /**

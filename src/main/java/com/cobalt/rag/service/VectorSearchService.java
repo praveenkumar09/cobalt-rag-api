@@ -2,6 +2,8 @@ package com.cobalt.rag.service;
 
 import com.cobalt.rag.model.ChunkResult;
 import com.cobalt.rag.model.CorpusSample;
+import com.cobalt.rag.model.DomainTag;
+import com.cobalt.rag.model.ProgramSource;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -9,7 +11,11 @@ import org.springframework.stereotype.Service;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
 
 @Service
 public class VectorSearchService {
@@ -35,6 +41,17 @@ public class VectorSearchService {
             WHERE embedding IS NOT NULL AND should_embed = true
             ORDER BY embedding <=> ?::vector
             LIMIT ?
+            """;
+
+    // Chunk rows are contiguous and gapless per program (the ingestor's chunker
+    // closes each chunk exactly where the next one starts), so every chunk for a
+    // program — not just the embedded/should_embed ones — ordered by line_start
+    // reconstructs the complete original file, never a fabricated approximation.
+    private static final String FULL_SOURCE_SQL = """
+            SELECT source_file, content
+            FROM chunks
+            WHERE program_id = ?
+            ORDER BY line_start NULLS LAST
             """;
 
     // Random sample of real, already-ingested programs/sections — used to ground
@@ -79,6 +96,51 @@ public class VectorSearchService {
         return results.stream()
                 .filter(c -> c.similarity() >= similarityThreshold)
                 .toList();
+    }
+
+    public Optional<ProgramSource> fetchFullSource(String programId) {
+        List<Object[]> rows = jdbc.query(
+                FULL_SOURCE_SQL,
+                (rs, rowNum) -> new Object[]{rs.getString("source_file"), rs.getString("content")},
+                programId
+        );
+        if (rows.isEmpty()) {
+            return Optional.empty();
+        }
+        String sourceFile = (String) rows.get(0)[0];
+        String content = rows.stream()
+                .map(row -> (String) row[1])
+                .reduce((a, b) -> a + "\n" + b)
+                .orElse("");
+        return Optional.of(new ProgramSource(programId, sourceFile, content));
+    }
+
+    /**
+     * Each program's real, most-frequent domain/sub-domain tag from ingestion —
+     * used to relabel the technical call-graph as a business-activity flow
+     * (see BusinessInsightService) without inventing any label.
+     */
+    public Map<String, DomainTag> fetchDomainTags(List<String> programIds) {
+        if (programIds.isEmpty()) {
+            return Map.of();
+        }
+
+        String placeholders = programIds.stream().map(id -> "?").collect(Collectors.joining(","));
+        String sql = "SELECT program_id, domain, sub_domain, count(*) AS cnt FROM chunks " +
+                "WHERE program_id IN (" + placeholders + ") " +
+                "GROUP BY program_id, domain, sub_domain ORDER BY program_id, cnt DESC";
+
+        List<Object[]> rows = jdbc.query(
+                sql,
+                (rs, rowNum) -> new Object[]{rs.getString("program_id"), rs.getString("domain"), rs.getString("sub_domain")},
+                programIds.toArray()
+        );
+
+        Map<String, DomainTag> result = new LinkedHashMap<>();
+        for (Object[] row : rows) {
+            result.putIfAbsent((String) row[0], new DomainTag((String) row[1], (String) row[2]));
+        }
+        return result;
     }
 
     public List<CorpusSample> sampleForSuggestions(int limit) {
