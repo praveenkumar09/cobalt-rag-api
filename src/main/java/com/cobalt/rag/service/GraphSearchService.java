@@ -18,25 +18,36 @@ public class GraphSearchService {
     @Value("${cobalt.rag.graph-context-limit:25}")
     private int limit;
 
-    // Fetch direct relationships for programs found via vector search
+    // Fetch direct relationships touching programs/nodes found via vector search.
+    // Matched UNDIRECTED ((n)-[r]-(m)) because the seed node is not always the
+    // source of the edge — e.g. a copybook (n.id = "ERRMSGS") only ever has
+    // INCOMING "COPIES" edges from the programs that reference it, never
+    // outgoing ones. startNode(r)/endNode(r) (not n/m) are used for the
+    // returned from/to so the true relationship direction is always reported
+    // correctly regardless of which side matched the seed.
     private static final String PROGRAM_RELS_QUERY = """
-            MATCH (n)-[r]->(m)
+            MATCH (n)-[r]-(m)
             WHERE n.id IN $ids
-            RETURN n.id AS fromId, n.label AS fromLabel, labels(n)[0] AS fromType,
+            RETURN startNode(r).id AS fromId, startNode(r).label AS fromLabel, labels(startNode(r))[0] AS fromType,
                    type(r) AS relType,
-                   m.id AS toId, m.label AS toLabel, labels(m)[0] AS toType
+                   endNode(r).id AS toId, endNode(r).label AS toLabel, labels(endNode(r))[0] AS toType
             LIMIT $limit
             """;
 
-    // Fallback: keyword-based fuzzy lookup on node labels
+    // Fallback: keyword-based fuzzy lookup on node labels — checks BOTH sides of
+    // the relationship (n and m), since the keyword may only match the node that
+    // is the target of the edge (e.g. a copybook name, which is never the source
+    // of a "COPIES" edge).
     private static final String KEYWORD_QUERY = """
-            MATCH (n)-[r]->(m)
+            MATCH (n)-[r]-(m)
             WHERE any(kw IN $keywords WHERE
                       toLower(n.label) CONTAINS toLower(kw)
-                   OR toLower(n.id)    CONTAINS toLower(kw))
-            RETURN n.id AS fromId, n.label AS fromLabel, labels(n)[0] AS fromType,
+                   OR toLower(n.id)    CONTAINS toLower(kw)
+                   OR toLower(m.label) CONTAINS toLower(kw)
+                   OR toLower(m.id)    CONTAINS toLower(kw))
+            RETURN startNode(r).id AS fromId, startNode(r).label AS fromLabel, labels(startNode(r))[0] AS fromType,
                    type(r) AS relType,
-                   m.id AS toId, m.label AS toLabel, labels(m)[0] AS toType
+                   endNode(r).id AS toId, endNode(r).label AS toLabel, labels(endNode(r))[0] AS toType
             LIMIT $limit
             """;
 
