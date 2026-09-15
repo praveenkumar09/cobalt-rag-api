@@ -22,6 +22,11 @@ public class RagService {
     private final VectorSearchService vectorSearch;
     private final GraphSearchService graphSearch;
     private final ChatModel chatModel;
+    // Used ONLY for the streamed answer's token flux — see its own Javadoc for
+    // why chatModel.stream() (Spring AI's OpenAiApi streaming path) can emit
+    // tokens out of order and this bypasses it. chatModel.call() (the
+    // non-streaming ask()) is unaffected and stays exactly as-is.
+    private final OrderedOpenAiStreamClient orderedStreamClient;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // ── System Prompt ──────────────────────────────────────────────────────────
@@ -159,10 +164,12 @@ public class RagService {
 
     public RagService(VectorSearchService vectorSearch,
                       GraphSearchService graphSearch,
-                      ChatModel chatModel) {
+                      ChatModel chatModel,
+                      OrderedOpenAiStreamClient orderedStreamClient) {
         this.vectorSearch = vectorSearch;
         this.graphSearch  = graphSearch;
         this.chatModel    = chatModel;
+        this.orderedStreamClient = orderedStreamClient;
     }
 
     public AskResponse ask(String question) {
@@ -248,15 +255,10 @@ public class RagService {
                 "chunksRetrieved", chunks.size()
         )));
 
-        // Events 2..N: streamed LLM tokens
-        Flux<String> tokenFlux = chatModel.stream(
-                new Prompt(List.of(
-                        new SystemMessage(SYSTEM_PROMPT),
-                        new UserMessage(userMessage)
-                ))
-        )
-        .mapNotNull(resp -> {
-            String text = resp.getResult().getOutput().getText();
+        // Events 2..N: streamed LLM tokens — via orderedStreamClient, NOT
+        // chatModel.stream(), so token order is guaranteed (see its Javadoc).
+        Flux<String> tokenFlux = orderedStreamClient.streamText(SYSTEM_PROMPT, userMessage)
+        .mapNotNull(text -> {
             if (text == null || text.isEmpty()) return null;
             Map<String, String> payload = new LinkedHashMap<>();
             payload.put("type", "token");
