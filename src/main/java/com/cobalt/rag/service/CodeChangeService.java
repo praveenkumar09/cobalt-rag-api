@@ -38,11 +38,20 @@ public class CodeChangeService {
 
     private final VectorSearchService vectorSearch;
     private final ChatModel chatModel;
+    // Used ONLY for proposeChangeStream's token flux — see its Javadoc (same
+    // class used by RagService) for why chatModel.stream() can emit tokens
+    // out of order. chatModel.call() (proposeChange, non-streaming) is
+    // unaffected and stays exactly as-is — but reordering matters even more
+    // here, since the output is COBOL SOURCE CODE, not prose: a misplaced
+    // token could silently produce syntactically broken code.
+    private final OrderedOpenAiStreamClient orderedStreamClient;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public CodeChangeService(VectorSearchService vectorSearch, ChatModel chatModel) {
+    public CodeChangeService(VectorSearchService vectorSearch, ChatModel chatModel,
+                              OrderedOpenAiStreamClient orderedStreamClient) {
         this.vectorSearch = vectorSearch;
         this.chatModel = chatModel;
+        this.orderedStreamClient = orderedStreamClient;
     }
 
     public Optional<ProgramSource> getSource(String programId) {
@@ -84,13 +93,8 @@ public class CodeChangeService {
 
         String userMessage = buildUserMessage(programId, question, answer, source.get().content());
 
-        Flux<String> tokenFlux = chatModel.stream(
-                new Prompt(List.of(
-                        new SystemMessage(SYSTEM_PROMPT),
-                        new UserMessage(userMessage)
-                ))
-        ).mapNotNull(resp -> {
-            String text = resp.getResult().getOutput().getText();
+        Flux<String> tokenFlux = orderedStreamClient.streamText(SYSTEM_PROMPT, userMessage)
+        .mapNotNull(text -> {
             if (text == null || text.isEmpty()) return null;
             Map<String, String> payload = new LinkedHashMap<>();
             payload.put("type", "token");
