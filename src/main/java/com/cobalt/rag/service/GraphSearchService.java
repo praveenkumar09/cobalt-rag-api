@@ -15,29 +15,67 @@ public class GraphSearchService {
 
     private final Driver driver;
 
+    // Per-DIRECTION cap (not combined) — outgoing and incoming each get this
+    // many relationship rows, so a program with many more callees than
+    // callers (or vice versa) can never crowd the other direction out.
     @Value("${cobalt.rag.graph-context-limit:25}")
     private int limit;
 
-    // Fetch direct relationships touching programs/nodes found via vector search.
-    // Matched UNDIRECTED ((n)-[r]-(m)) because the seed node is not always the
-    // source of the edge — e.g. a copybook (n.id = "ERRMSGS") only ever has
-    // INCOMING "COPIES" edges from the programs that reference it, never
-    // outgoing ones. startNode(r)/endNode(r) (not n/m) are used for the
-    // returned from/to so the true relationship direction is always reported
-    // correctly regardless of which side matched the seed.
-    private static final String PROGRAM_RELS_QUERY = """
-            MATCH (n)-[r]-(m)
+    // How many hops to trace in each direction. Kept modest — call graphs
+    // fan out fast, and this also bounds how many PATHS Neo4j has to explore.
+    @Value("${cobalt.rag.graph-max-hops:4}")
+    private int configuredMaxHops;
+
+    // Caps the number of PATHS considered (before they're unwound into
+    // individual edges), independent of how many edge ROWS are ultimately
+    // returned — protects against combinatorial blow-up in a densely
+    // connected graph at higher hop counts.
+    @Value("${cobalt.rag.graph-path-limit:100}")
+    private int pathLimit;
+
+    // Neo4j requires the hop bound in a variable-length pattern to be a
+    // literal in the query text, not a bindable parameter — so these two
+    // query strings are built once a hop count is known, from our own config
+    // (never user input), with the value clamped to a sane range first.
+    private String outgoingQuery;
+    private String incomingQuery;
+
+    // Traces what the seed program(s) call, transitively — direct callees,
+    // what THOSE call, and so on up to maxHops. UNWIND flattens each matched
+    // path into its individual edges so the caller sees every hop, not just
+    // the first; WITH DISTINCT r drops an edge that appears in more than one
+    // path (common with overlapping call chains).
+    private static final String OUTGOING_TEMPLATE = """
+            MATCH path = (n)-[*1..%d]->(m)
             WHERE n.id IN $ids
+            WITH path
+            LIMIT $pathLimit
+            UNWIND relationships(path) AS r
+            WITH DISTINCT r
             RETURN startNode(r).id AS fromId, startNode(r).label AS fromLabel, labels(startNode(r))[0] AS fromType,
                    type(r) AS relType,
                    endNode(r).id AS toId, endNode(r).label AS toLabel, labels(endNode(r))[0] AS toType
-            LIMIT $limit
+            LIMIT $rowLimit
             """;
 
-    // Fallback: keyword-based fuzzy lookup on node labels — checks BOTH sides of
-    // the relationship (n and m), since the keyword may only match the node that
-    // is the target of the edge (e.g. a copybook name, which is never the source
-    // of a "COPIES" edge).
+    // Traces what calls INTO the seed program(s), transitively — direct
+    // callers, what calls THOSE, and so on up to maxHops.
+    private static final String INCOMING_TEMPLATE = """
+            MATCH path = (m)-[*1..%d]->(n)
+            WHERE n.id IN $ids
+            WITH path
+            LIMIT $pathLimit
+            UNWIND relationships(path) AS r
+            WITH DISTINCT r
+            RETURN startNode(r).id AS fromId, startNode(r).label AS fromLabel, labels(startNode(r))[0] AS fromType,
+                   type(r) AS relType,
+                   endNode(r).id AS toId, endNode(r).label AS toLabel, labels(endNode(r))[0] AS toType
+            LIMIT $rowLimit
+            """;
+
+    // Fallback: keyword-based fuzzy lookup on node labels — only used when no
+    // seed program is known. Deliberately stays a single undirected hop:
+    // without a seed there's no program to trace multi-hop chains FROM.
     private static final String KEYWORD_QUERY = """
             MATCH (n)-[r]-(m)
             WHERE any(kw IN $keywords WHERE
@@ -55,18 +93,40 @@ public class GraphSearchService {
         this.driver = driver;
     }
 
+    private String outgoingQuery() {
+        if (outgoingQuery == null) {
+            outgoingQuery = OUTGOING_TEMPLATE.formatted(clampedMaxHops());
+        }
+        return outgoingQuery;
+    }
+
+    private String incomingQuery() {
+        if (incomingQuery == null) {
+            incomingQuery = INCOMING_TEMPLATE.formatted(clampedMaxHops());
+        }
+        return incomingQuery;
+    }
+
+    private int clampedMaxHops() {
+        return Math.max(1, Math.min(configuredMaxHops, 6));
+    }
+
     public List<GraphRelationship> findRelationships(List<String> programIds, List<String> keywords) {
         List<GraphRelationship> results = new ArrayList<>();
         try (Session session = driver.session()) {
             if (!programIds.isEmpty()) {
-                session.run(PROGRAM_RELS_QUERY, Map.of("ids", programIds, "limit", limit))
+                session.run(outgoingQuery(), Map.of("ids", programIds, "pathLimit", pathLimit, "rowLimit", limit))
                        .list()
-                       .forEach(rec -> addRelationship(results, rec));
+                       .forEach(rec -> addRelationship(results, rec, "OUTGOING"));
+                session.run(incomingQuery(), Map.of("ids", programIds, "pathLimit", pathLimit, "rowLimit", limit))
+                       .list()
+                       .forEach(rec -> addRelationship(results, rec, "INCOMING"));
             }
-            if (!keywords.isEmpty() && results.size() < limit) {
-                session.run(KEYWORD_QUERY, Map.of("keywords", keywords, "limit", limit - results.size()))
+            int combinedLimit = limit * 2;
+            if (!keywords.isEmpty() && results.size() < combinedLimit) {
+                session.run(KEYWORD_QUERY, Map.of("keywords", keywords, "limit", combinedLimit - results.size()))
                        .list()
-                       .forEach(rec -> addRelationship(results, rec));
+                       .forEach(rec -> addRelationship(results, rec, null));
             }
         } catch (Exception ex) {
             // Graph context is best-effort; do not fail the whole request
@@ -75,7 +135,7 @@ public class GraphSearchService {
         return results.stream().distinct().toList();
     }
 
-    private void addRelationship(List<GraphRelationship> results, org.neo4j.driver.Record record) {
+    private void addRelationship(List<GraphRelationship> results, org.neo4j.driver.Record record, String direction) {
         String fromId = record.get("fromId").asString("");
         String fromLabel = record.get("fromLabel").asString("");
         String fromType = record.get("fromType").asString("");
@@ -84,7 +144,7 @@ public class GraphSearchService {
         String toLabel = record.get("toLabel").asString("");
         String toType = record.get("toType").asString("");
         if (!fromLabel.isBlank() && !toLabel.isBlank()) {
-            results.add(new GraphRelationship(fromId, fromLabel, fromType, relType, toId, toLabel, toType));
+            results.add(new GraphRelationship(fromId, fromLabel, fromType, relType, toId, toLabel, toType, direction));
         }
     }
 }
