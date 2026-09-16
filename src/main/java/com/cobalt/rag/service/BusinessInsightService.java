@@ -11,6 +11,7 @@ import com.cobalt.rag.model.GraphRelationship;
 import com.cobalt.rag.model.TechnicalRule;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.Timer;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
@@ -176,15 +177,18 @@ public class BusinessInsightService {
 
     private final VectorSearchService vectorSearch;
     private final ChatModel chatModel;
+    private final RagMetrics metrics;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public BusinessInsightService(VectorSearchService vectorSearch, ChatModel chatModel) {
+    public BusinessInsightService(VectorSearchService vectorSearch, ChatModel chatModel, RagMetrics metrics) {
         this.vectorSearch = vectorSearch;
         this.chatModel = chatModel;
+        this.metrics = metrics;
     }
 
     public List<BusinessRule> extractBusinessRules(String question, String answer, String contextBlock,
                                                      List<ChunkResult> chunks) {
+        Timer.Sample sample = metrics.startLlmCall();
         try {
             Set<String> validChunkIds = chunks.stream().map(ChunkResult::chunkId).collect(Collectors.toSet());
             String userMessage = buildExtractionUserMessage(question, answer, contextBlock);
@@ -198,12 +202,16 @@ public class BusinessInsightService {
                     .limit(6)
                     .toList();
         } catch (Exception e) {
+            metrics.recordLlmCallError("business_rules");
             return List.of();
+        } finally {
+            metrics.stopLlmCall(sample, "business_rules");
         }
     }
 
     public List<TechnicalRule> extractTechnicalRules(String question, String answer, String contextBlock,
                                                        List<ChunkResult> chunks) {
+        Timer.Sample sample = metrics.startLlmCall();
         try {
             Set<String> validChunkIds = chunks.stream().map(ChunkResult::chunkId).collect(Collectors.toSet());
             String userMessage = buildExtractionUserMessage(question, answer, contextBlock);
@@ -217,12 +225,16 @@ public class BusinessInsightService {
                     .limit(8)
                     .toList();
         } catch (Exception e) {
+            metrics.recordLlmCallError("technical_rules");
             return List.of();
+        } finally {
+            metrics.stopLlmCall(sample, "technical_rules");
         }
     }
 
     public List<DecisionTableRow> extractDecisionTable(String question, String answer, String contextBlock,
                                                          List<ChunkResult> chunks) {
+        Timer.Sample sample = metrics.startLlmCall();
         try {
             Set<String> validChunkIds = chunks.stream().map(ChunkResult::chunkId).collect(Collectors.toSet());
             String userMessage = buildExtractionUserMessage(question, answer, contextBlock);
@@ -237,12 +249,16 @@ public class BusinessInsightService {
                     .limit(8)
                     .toList();
         } catch (Exception e) {
+            metrics.recordLlmCallError("decision_table");
             return List.of();
+        } finally {
+            metrics.stopLlmCall(sample, "decision_table");
         }
     }
 
     public List<DataDictionaryEntry> extractDataDictionary(String question, String answer, String contextBlock,
                                                              List<ChunkResult> chunks) {
+        Timer.Sample sample = metrics.startLlmCall();
         try {
             Set<String> validChunkIds = chunks.stream().map(ChunkResult::chunkId).collect(Collectors.toSet());
             String userMessage = buildExtractionUserMessage(question, answer, contextBlock);
@@ -257,7 +273,10 @@ public class BusinessInsightService {
                     .limit(10)
                     .toList();
         } catch (Exception e) {
+            metrics.recordLlmCallError("data_dictionary");
             return List.of();
+        } finally {
+            metrics.stopLlmCall(sample, "data_dictionary");
         }
     }
 
@@ -307,6 +326,7 @@ public class BusinessInsightService {
      * model can influence wording only, never topology.
      */
     private List<BusinessFlowEdge> polishRelations(List<BusinessFlowEdge> deterministic) {
+        Timer.Sample sample = metrics.startLlmCall();
         try {
             String inputJson = objectMapper.writeValueAsString(deterministic.stream()
                     .map(e -> Map.of("from", e.fromActivity(), "relation", e.relation(), "to", e.toActivity()))
@@ -336,7 +356,10 @@ public class BusinessInsightService {
             }
             return result;
         } catch (Exception e) {
+            metrics.recordLlmCallError("business_flow_polish");
             return deterministic;
+        } finally {
+            metrics.stopLlmCall(sample, "business_flow_polish");
         }
     }
 

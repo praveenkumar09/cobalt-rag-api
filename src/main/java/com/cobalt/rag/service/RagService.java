@@ -13,6 +13,7 @@ import com.cobalt.rag.model.SourceCitation;
 import com.cobalt.rag.model.TechnicalRule;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.Timer;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
@@ -34,6 +35,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
 @Service
@@ -50,6 +52,7 @@ public class RagService {
     // use in this class: business rules, follow-ups, starter suggestions,
     // the non-streaming ask()) is unaffected and stays exactly as-is.
     private final OrderedOpenAiStreamClient orderedStreamClient;
+    private final RagMetrics metrics;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // Canned fallback answer the LLM is instructed to return verbatim for off-topic
@@ -269,18 +272,21 @@ public class RagService {
                       ImpactAnalysisService impactAnalysisService,
                       BusinessInsightService businessInsightService,
                       ChatModel chatModel,
-                      OrderedOpenAiStreamClient orderedStreamClient) {
+                      OrderedOpenAiStreamClient orderedStreamClient,
+                      RagMetrics metrics) {
         this.vectorSearch = vectorSearch;
         this.graphSearch  = graphSearch;
         this.impactAnalysisService = impactAnalysisService;
         this.businessInsightService = businessInsightService;
         this.chatModel    = chatModel;
         this.orderedStreamClient = orderedStreamClient;
+        this.metrics = metrics;
     }
 
     public AskResponse ask(String question) {
         // 1. Semantic search — retrieve top-K relevant code chunks from pgvector
         List<ChunkResult> chunks = vectorSearch.search(question);
+        metrics.recordChunksRetrieved(chunks.size());
 
         // 2. Extract program IDs and keywords for graph traversal
         List<String> programIds = chunks.stream()
@@ -293,6 +299,7 @@ public class RagService {
 
         // 3. Graph search — find program relationships in Neo4j
         List<GraphRelationship> graphContext = graphSearch.findRelationships(programIds, keywords);
+        metrics.recordGraphContext(!graphContext.isEmpty());
 
         // 4. Build augmented context block (vector + graph)
         String contextBlock = buildContextBlock(chunks, graphContext);
@@ -316,18 +323,27 @@ public class RagService {
             // 3b. Impact analysis doesn't depend on the answer text — start it now, on
             // a virtual thread, so its (potentially slow) Neo4j traversal runs
             // concurrently with the main LLM call below instead of blocking ahead of it.
-            Future<ImpactAnalysis> impactFuture = executor.submit(() ->
-                    looksLikeChangeRequest(question) ? impactAnalysisService.analyze(programIds) : null);
+            Future<ImpactAnalysis> impactFuture = executor.submit(() -> {
+                if (!looksLikeChangeRequest(question)) return null;
+                metrics.recordImpactAnalysisTriggered();
+                return impactAnalysisService.analyze(programIds);
+            });
 
             // 6. Call LLM
-            var response = chatModel.call(
-                    new Prompt(List.of(
-                            new SystemMessage(SYSTEM_PROMPT),
-                            new UserMessage(userMessage)
-                    ))
-            );
-            answer = response.getResult().getOutput().getText();
+            Timer.Sample answerSample = metrics.startLlmCall();
+            try {
+                var response = chatModel.call(
+                        new Prompt(List.of(
+                                new SystemMessage(SYSTEM_PROMPT),
+                                new UserMessage(userMessage)
+                        ))
+                );
+                answer = response.getResult().getOutput().getText();
+            } finally {
+                metrics.stopLlmCall(answerSample, "answer");
+            }
             boolean outOfScope = isOutOfScope(answer);
+            metrics.recordAnswer(outOfScope);
 
             ImpactAnalysis resolvedImpact;
             try {
@@ -387,6 +403,7 @@ public class RagService {
     public Flux<String> askStream(String question) {
         // Synchronous RAG retrieval (DB calls are blocking, done before streaming starts)
         List<ChunkResult> chunks = vectorSearch.search(question);
+        metrics.recordChunksRetrieved(chunks.size());
 
         List<String> programIds = chunks.stream()
                 .map(ChunkResult::programId)
@@ -395,6 +412,7 @@ public class RagService {
                 .toList();
 
         List<GraphRelationship> graphContext = graphSearch.findRelationships(programIds, extractKeywords(question));
+        metrics.recordGraphContext(!graphContext.isEmpty());
 
         // Impact analysis doesn't depend on the answer text either — same reasoning
         // and pattern as businessFlowMono below: fire it now, on a background thread,
@@ -403,6 +421,7 @@ public class RagService {
         // the first token) behind a potentially-slow Neo4j traversal.
         Mono<String> impactAnalysisMono = Mono.fromCallable(() -> {
                     if (!looksLikeChangeRequest(question)) return null;
+                    metrics.recordImpactAnalysisTriggered();
                     ImpactAnalysis analysis = impactAnalysisService.analyze(programIds);
                     return analysis == null ? null : toJson(Map.of("type", "impactAnalysis", "analysis", analysis));
                 })
@@ -446,7 +465,13 @@ public class RagService {
         // Events 2..N: streamed LLM tokens — via orderedStreamClient, NOT
         // chatModel.stream(), so token order is guaranteed (see its Javadoc).
         StringBuilder fullAnswer = new StringBuilder();
+        AtomicReference<Timer.Sample> answerStreamSample = new AtomicReference<>();
         Flux<String> tokenFlux = orderedStreamClient.streamText(SYSTEM_PROMPT, userMessage)
+        .doOnSubscribe(sub -> answerStreamSample.set(metrics.startLlmCall()))
+        .doFinally(signal -> {
+            Timer.Sample sample = answerStreamSample.get();
+            if (sample != null) metrics.stopLlmCall(sample, "answer_stream");
+        })
         .mapNotNull(text -> {
             if (text == null || text.isEmpty()) return null;
             fullAnswer.append(text);
@@ -454,6 +479,14 @@ public class RagService {
             payload.put("type", "token");
             payload.put("content", text);
             return toJson(payload);
+        });
+
+        // Records the in-scope/out-of-scope outcome exactly once, right after the
+        // token stream finishes — independent of correctionFlux below, which only
+        // runs when there's something to retract.
+        Flux<String> metricsFlux = Flux.defer(() -> {
+            metrics.recordAnswer(isOutOfScope(fullAnswer.toString()));
+            return Flux.empty();
         });
 
         // Event N+1: correction — only sent if the fully-streamed answer turned out to
@@ -535,7 +568,7 @@ public class RagService {
         // Final event: done signal
         Flux<String> doneFlux = Flux.just("[DONE]");
 
-        return Flux.concat(metaFlux, tokenFlux, correctionFlux,
+        return Flux.concat(metaFlux, tokenFlux, metricsFlux, correctionFlux,
                 postAnswerInsightsFlux, businessFlowFlux, impactAnalysisFlux, doneFlux);
     }
 
@@ -594,6 +627,7 @@ public class RagService {
     }
 
     private List<String> generateStarterSuggestions() {
+        Timer.Sample sample = metrics.startLlmCall();
         try {
             List<CorpusSample> samples = vectorSearch.sampleForSuggestions(20);
             if (samples.isEmpty()) {
@@ -631,7 +665,10 @@ public class RagService {
                     .limit(3)
                     .toList();
         } catch (Exception e) {
+            metrics.recordLlmCallError("starter_suggestions");
             return List.of();
+        } finally {
+            metrics.stopLlmCall(sample, "starter_suggestions");
         }
     }
 
@@ -646,6 +683,7 @@ public class RagService {
     }
 
     private List<String> generateFollowUps(String question, String answer, String contextBlock) {
+        Timer.Sample sample = metrics.startLlmCall();
         try {
             String userMessage = """
                     Original question: %s
@@ -673,7 +711,10 @@ public class RagService {
                     .limit(3)
                     .toList();
         } catch (Exception e) {
+            metrics.recordLlmCallError("followups");
             return List.of();
+        } finally {
+            metrics.stopLlmCall(sample, "followups");
         }
     }
 

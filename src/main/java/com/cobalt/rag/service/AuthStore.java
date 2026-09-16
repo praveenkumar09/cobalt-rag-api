@@ -52,6 +52,12 @@ public class AuthStore {
                 )
                 """);
         jdbc.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id)");
+
+        // Sessions are persisted in Postgres so they survive within a running
+        // app instance, but every fresh boot should force everyone to sign in
+        // again rather than silently resuming whatever was valid before the
+        // restart — so wipe the table once, here, on startup.
+        jdbc.update("DELETE FROM sessions");
     }
 
     public String signup(String email, String password) {

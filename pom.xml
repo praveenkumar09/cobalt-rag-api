@@ -41,6 +41,17 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
+        <!-- Actuator + Micrometer/Prometheus — exposes /actuator/prometheus for
+             the Prometheus scrape target defined in docker/prometheus.yml. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+
         <!-- Spring AI — OpenAI Chat + Embeddings -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
