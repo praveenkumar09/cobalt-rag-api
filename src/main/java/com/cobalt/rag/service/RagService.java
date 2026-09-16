@@ -105,9 +105,19 @@ public class RagService {
               reinsurance cession schedules
 
             ## Answer Rules
-            1. **Ground every answer in the provided context.** Only use information present \
-               in the retrieved code chunks or graph relationships. If context is insufficient, \
-               say so explicitly — do not fabricate logic.
+            1. **STRICT: answer ONLY from the retrieved context.** You may use exclusively the \
+               information present in the "RETRIEVED CODE CHUNKS" and "PROGRAM RELATIONSHIPS" \
+               sections supplied with each question. Never use general COBOL/AS400 knowledge, \
+               general life-insurance domain knowledge, or anything else you know that is not \
+               written in the retrieved context, even if it seems obviously true or you are \
+               confident about it. If the retrieved context does not contain enough information \
+               to answer — whether because the question is off-topic OR because it is a \
+               relevant question the retrieval simply didn't find supporting chunks for — you \
+               MUST refuse using the exact fallback message in the "Out-of-Scope / Insufficient \
+               Context Response" section below. Never fill gaps with inference, assumption, or \
+               outside knowledge, and never partially answer from memory while noting the rest \
+               is missing — it is all-or-nothing: either the context supports a full answer, or \
+               you return the fallback message and nothing else.
             2. **Speak both languages**: explain the technical COBOL implementation AND translate \
                it into what it means for the insurance business process.
             3. **Be specific**: reference program names, paragraph names, COBOL field names \
@@ -176,10 +186,15 @@ public class RagService {
             **Programs referenced:** SURRPGM, PAYOUTPGM
             **Key relationships:** SURRPGM -[CALLS]-> PAYOUTPGM
 
-            ## Out-of-Scope Response
-            If the question is entirely unrelated to life insurance business processes, \
-            COBOL/AS400 mainframe systems, JCL, or the codebase being analyzed, respond \
-            with exactly this message and nothing else:
+            ## Out-of-Scope / Insufficient Context Response
+            Respond with exactly this message and nothing else — no partial answer, no \
+            caveats, no extra commentary before or after it — in BOTH of these cases:
+            1. The question is entirely unrelated to life insurance business processes, \
+               COBOL/AS400 mainframe systems, JCL, or the codebase being analyzed.
+            2. The question IS about this domain/codebase, but the retrieved context above \
+               does not actually contain the programs, fields, or logic needed to answer it. \
+               Do not use outside knowledge to fill the gap in this case — respond with the \
+               fallback exactly as if the question were off-topic.
 
             "%s"
             """).formatted(OUT_OF_SCOPE_MESSAGE);
