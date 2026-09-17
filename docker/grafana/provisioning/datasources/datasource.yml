@@ -8,3 +8,24 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
     editable: false
+
+  # Backs the Security row's total-count stat panels. Prometheus counters are
+  # in-memory and reset on every app restart (see rag_security_violations_total),
+  # which made two of the three violation-type tiles show 0 shortly after any
+  # restart even though real history existed. security_events in Postgres is
+  # the durable source of truth already used by /admin — querying it directly
+  # here keeps /stats consistent with /admin instead of being restart-fragile.
+  - name: Postgres
+    uid: postgres
+    type: postgres
+    access: proxy
+    url: postgres:5432
+    database: ingestor
+    user: admin
+    jsonData:
+      database: ingestor
+      sslmode: disable
+      postgresVersion: 1600
+    secureJsonData:
+      password: admin
+    editable: false

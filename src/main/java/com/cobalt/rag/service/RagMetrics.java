@@ -47,11 +47,27 @@ public class RagMetrics {
                 .increment();
     }
 
-    /** One answered question, tagged by whether it was in-scope or hit the canned fallback. */
-    public void recordAnswer(boolean outOfScope) {
+    /** @param outcome "in_scope", "out_of_scope", or "security_violation" */
+    public void recordAnswer(String outcome) {
         Counter.builder("rag.answers")
-                .description("Answers returned, tagged by whether they were in-scope or the out-of-scope fallback")
-                .tag("outcome", outOfScope ? "out_of_scope" : "in_scope")
+                .description("Answers returned, tagged by outcome")
+                .tag("outcome", outcome)
+                .register(registry)
+                .increment();
+    }
+
+    /** @param type "prompt_injection", "pii_requested", or "pii_provided" */
+    public void recordSecurityViolation(String type) {
+        Counter.builder("rag.security.violations")
+                .description("Questions flagged as prompt injection, a PII request, or PII volunteered by the user")
+                .tag("type", type)
+                .register(registry)
+                .increment();
+    }
+
+    public void recordRateLimitExceeded() {
+        Counter.builder("rag.rate_limit.exceeded")
+                .description("Requests to /api/ask or /api/ask/formal rejected for exceeding the per-caller rate limit")
                 .register(registry)
                 .increment();
     }

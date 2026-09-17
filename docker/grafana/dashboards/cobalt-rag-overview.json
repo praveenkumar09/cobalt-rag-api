@@ -205,6 +205,105 @@
           "legendFormat": "active connections"
         }
       ]
+    },
+    {
+      "id": 16,
+      "type": "row",
+      "title": "Security",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 }
+    },
+    {
+      "id": 17,
+      "type": "stat",
+      "title": "Prompt injection attempts (24h)",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 42 },
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "fieldConfig": { "defaults": { "decimals": 0, "thresholds": { "mode": "absolute", "steps": [
+        { "color": "green", "value": null }, { "color": "red", "value": 1 }
+      ] } }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "rawSql": "SELECT COUNT(*) AS count FROM security_events WHERE violation_type = 'prompt_injection' AND created_at > now() - interval '24 hours'",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "stat",
+      "title": "PII requested (24h)",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 42 },
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "fieldConfig": { "defaults": { "decimals": 0, "thresholds": { "mode": "absolute", "steps": [
+        { "color": "green", "value": null }, { "color": "orange", "value": 1 }
+      ] } }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "rawSql": "SELECT COUNT(*) AS count FROM security_events WHERE violation_type = 'pii_requested' AND created_at > now() - interval '24 hours'",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "stat",
+      "title": "PII volunteered by user (24h)",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 42 },
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "fieldConfig": { "defaults": { "decimals": 0, "thresholds": { "mode": "absolute", "steps": [
+        { "color": "green", "value": null }, { "color": "orange", "value": 1 }
+      ] } }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "rawSql": "SELECT COUNT(*) AS count FROM security_events WHERE violation_type = 'pii_provided' AND created_at > now() - interval '24 hours'",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Security violations by type",
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 48 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (type) (rate(rag_security_violations_total[15m]))",
+          "legendFormat": "{{type}}"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Rate-limit rejections (rate)",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 48 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps", "decimals": 2 }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(rag_rate_limit_exceeded_total[15m])) or vector(0)",
+          "legendFormat": "rejected/s"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "text",
+      "title": "",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 56 },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "mode": "markdown", "content": "" },
+      "transparent": true
     }
   ]
 }

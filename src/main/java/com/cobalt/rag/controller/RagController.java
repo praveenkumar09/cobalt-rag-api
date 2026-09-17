@@ -3,7 +3,12 @@ package com.cobalt.rag.controller;
 import com.cobalt.rag.model.AskRequest;
 import com.cobalt.rag.model.AskResponse;
 import com.cobalt.rag.model.SuggestionsResponse;
+import com.cobalt.rag.service.AskRateLimiter;
+import com.cobalt.rag.service.AuthStore;
+import com.cobalt.rag.service.RagMetrics;
 import com.cobalt.rag.service.RagService;
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -16,9 +21,36 @@ import java.util.Map;
 public class RagController {
 
     private final RagService ragService;
+    private final AuthStore authStore;
+    private final AskRateLimiter rateLimiter;
+    private final RagMetrics metrics;
 
-    public RagController(RagService ragService) {
+    public RagController(RagService ragService, AuthStore authStore, AskRateLimiter rateLimiter, RagMetrics metrics) {
         this.ragService = ragService;
+        this.authStore = authStore;
+        this.rateLimiter = rateLimiter;
+        this.metrics = metrics;
+    }
+
+    /**
+     * /api/ask and /api/ask/formal don't require authentication (no 401 on a
+     * missing/invalid token) — but when a valid session token IS present, we
+     * resolve it so security-relevant questions (see RagService's Security
+     * Guidelines) can be attributed to a user in the /admin audit log instead
+     * of recorded as anonymous.
+     */
+    private String resolveUserIdOrNull(String token) {
+        return authStore.resolveUserId(token).orElse(null);
+    }
+
+    /**
+     * Rate-limit key: the resolved user id when available, otherwise the
+     * caller's remote address — so unauthenticated callers (these endpoints
+     * don't require a token) are still individually throttled rather than
+     * sharing one global bucket.
+     */
+    private String rateLimitKey(String userId, HttpServletRequest request) {
+        return userId != null ? "user:" + userId : "ip:" + request.getRemoteAddr();
     }
 
     /**
@@ -44,11 +76,19 @@ public class RagController {
      *   data: [DONE]
      */
     @PostMapping(value = "/ask", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<String> ask(@RequestBody AskRequest request) {
+    public Flux<String> ask(
+            @RequestHeader(value = "X-Session-Token", required = false) String token,
+            @RequestBody AskRequest request,
+            HttpServletRequest httpRequest) {
         if (request.question() == null || request.question().isBlank()) {
             return Flux.error(new IllegalArgumentException("Question must not be blank"));
         }
-        return ragService.askStream(request.question().trim());
+        String userId = resolveUserIdOrNull(token);
+        if (!rateLimiter.tryAcquire(rateLimitKey(userId, httpRequest))) {
+            metrics.recordRateLimitExceeded();
+            return Flux.error(new RateLimitExceededException());
+        }
+        return ragService.askStream(request.question().trim(), userId);
     }
 
     /**
@@ -100,11 +140,19 @@ public class RagController {
      * suggestions.
      */
     @PostMapping(value = "/ask/formal", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<AskResponse> askFormal(@RequestBody AskRequest request) {
+    public ResponseEntity<AskResponse> askFormal(
+            @RequestHeader(value = "X-Session-Token", required = false) String token,
+            @RequestBody AskRequest request,
+            HttpServletRequest httpRequest) {
         if (request.question() == null || request.question().isBlank()) {
             return ResponseEntity.badRequest().build();
         }
-        return ResponseEntity.ok(ragService.ask(request.question().trim()));
+        String userId = resolveUserIdOrNull(token);
+        if (!rateLimiter.tryAcquire(rateLimitKey(userId, httpRequest))) {
+            metrics.recordRateLimitExceeded();
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
+        }
+        return ResponseEntity.ok(ragService.ask(request.question().trim(), userId));
     }
 
     /**
