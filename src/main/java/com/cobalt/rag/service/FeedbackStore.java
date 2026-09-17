@@ -49,7 +49,7 @@ public class FeedbackStore {
         );
     }
 
-    public FeedbackStats stats(int recentLimit) {
+    public FeedbackStats stats(int limit, int offset) {
         Long total = jdbc.queryForObject("SELECT COUNT(*) FROM feedback", Long.class);
         Long last7Days = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM feedback WHERE created_at > now() - interval '7 days'", Long.class);
@@ -57,7 +57,7 @@ public class FeedbackStore {
         List<FeedbackEntry> recent = jdbc.query(
                 "SELECT f.id, u.email, f.question, f.answer_snippet, f.message, f.created_at " +
                         "FROM feedback f JOIN users u ON u.id = f.user_id " +
-                        "ORDER BY f.created_at DESC LIMIT ?",
+                        "ORDER BY f.created_at DESC LIMIT ? OFFSET ?",
                 (rs, rowNum) -> new FeedbackEntry(
                         rs.getString("id"),
                         rs.getString("email"),
@@ -66,7 +66,7 @@ public class FeedbackStore {
                         rs.getString("message"),
                         rs.getTimestamp("created_at").toInstant()
                 ),
-                recentLimit
+                limit, offset
         );
 
         return new FeedbackStats(total == null ? 0 : total, last7Days == null ? 0 : last7Days, recent);

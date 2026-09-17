@@ -47,10 +47,11 @@ public class FeedbackController {
     @GetMapping(value = "/api/admin/feedback/stats", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<FeedbackStats> stats(
             @RequestHeader(value = "X-Session-Token", required = false) String token,
-            @RequestParam(defaultValue = "50") int limit) {
+            @RequestParam(defaultValue = "10") int limit,
+            @RequestParam(defaultValue = "0") int offset) {
         try {
             authStore.requireUserId(token);
-            return ResponseEntity.ok(feedbackStore.stats(limit));
+            return ResponseEntity.ok(feedbackStore.stats(limit, offset));
         } catch (AuthStore.InvalidCredentialsException e) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         }

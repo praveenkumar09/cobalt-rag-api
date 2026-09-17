@@ -284,26 +284,19 @@
     {
       "id": 21,
       "type": "stat",
-      "title": "Rate-limit rejections (rate)",
+      "title": "Rate-limit rejections (1h)",
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 48 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": { "defaults": { "unit": "reqps", "decimals": 2 }, "overrides": [] },
+      "fieldConfig": { "defaults": { "decimals": 0, "thresholds": { "mode": "absolute", "steps": [
+        { "color": "green", "value": null }, { "color": "orange", "value": 1 }
+      ] } }, "overrides": [] },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(rag_rate_limit_exceeded_total[15m])) or vector(0)",
-          "legendFormat": "rejected/s"
+          "expr": "sum(increase(rag_rate_limit_exceeded_total[1h])) or vector(0)",
+          "legendFormat": "rejections"
         }
       ]
-    },
-    {
-      "id": 22,
-      "type": "text",
-      "title": "",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 56 },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
-      "options": { "mode": "markdown", "content": "" },
-      "transparent": true
     }
   ]
 }

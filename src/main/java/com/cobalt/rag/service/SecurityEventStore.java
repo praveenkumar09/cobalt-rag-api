@@ -56,7 +56,7 @@ public class SecurityEventStore {
         );
     }
 
-    public SecurityStats stats(int recentLimit) {
+    public SecurityStats stats(int limit, int offset) {
         Long total = jdbc.queryForObject("SELECT COUNT(*) FROM security_events", Long.class);
         Long promptInjection = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM security_events WHERE violation_type = 'prompt_injection'", Long.class);
@@ -68,7 +68,7 @@ public class SecurityEventStore {
         List<SecurityEvent> recent = jdbc.query(
                 "SELECT se.id, COALESCE(u.email, 'anonymous') AS email, se.question, se.violation_type, se.created_at " +
                         "FROM security_events se LEFT JOIN users u ON u.id = se.user_id " +
-                        "ORDER BY se.created_at DESC LIMIT ?",
+                        "ORDER BY se.created_at DESC LIMIT ? OFFSET ?",
                 (rs, rowNum) -> new SecurityEvent(
                         rs.getString("id"),
                         rs.getString("email"),
@@ -76,7 +76,7 @@ public class SecurityEventStore {
                         rs.getString("violation_type"),
                         rs.getTimestamp("created_at").toInstant()
                 ),
-                recentLimit
+                limit, offset
         );
 
         return new SecurityStats(
