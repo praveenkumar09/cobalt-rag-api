@@ -8,6 +8,8 @@ import com.cobalt.rag.model.DataDictionaryEntry;
 import com.cobalt.rag.model.DecisionTableRow;
 import com.cobalt.rag.model.DomainTag;
 import com.cobalt.rag.model.GraphRelationship;
+import com.cobalt.rag.model.ScenarioStep;
+import com.cobalt.rag.model.ScenarioTrace;
 import com.cobalt.rag.model.TechnicalRule;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -117,6 +119,35 @@ public class BusinessInsightService {
             these four keys, no markdown fences, no commentary. Example:
             [{"condition":"Policy is less than 2 years old","outcome":"Surrender request is rejected","exception":"Hardship waiver code on file allows early surrender","chunkId":"SURRPGM.cbl#2200-VALIDATE-SURRENDER"}]
             """).formatted(RELEVANCE_GATE, CHUNK_REFERENCE_INSTRUCTION);
+
+    private static final String SCENARIO_TRACE_SYSTEM_PROMPT = ("""
+            You trace a concrete "what if" scenario through COBOL decision logic for a business \
+            audience. You are given the user's ORIGINAL QUESTION (which describes a specific \
+            hypothetical situation with concrete values — e.g. a policy year, an amount, a \
+            status), the assistant's ANSWER, and the retrieved code that grounded that answer.
+
+            First, judge whether the question actually describes a concrete scenario (specific \
+            values you can trace through real decision logic) AND whether the retrieved code \
+            contains decision logic relevant to it. If either is false, respond with exactly \
+            {"steps":[],"outcome":null} — do not fabricate a trace from logic that isn't there.
+
+            When there genuinely is a traceable scenario, walk through the relevant decision \
+            points from the retrieved code IN ORDER, evaluating each one against the scenario's \
+            specific values. For each step, provide:
+             - "condition": the business condition being checked, in plain language (not COBOL syntax)
+             - "result": how that condition evaluates for THIS scenario's specific values (e.g. \
+               "Yes — 3 years is less than the 5-year minimum")
+             - "explanation": what that result means in plain business terms
+
+            %s
+            After the last step, give one final "outcome": a one- or two-sentence plain-language \
+            summary of what ultimately happens to this scenario.
+
+            Return at most 8 steps. Respond with ONLY a JSON object with exactly two keys, \
+            "steps" (array of objects with condition/result/explanation/chunkId) and "outcome" \
+            (string or null) — no markdown fences, no commentary. Example:
+            {"steps":[{"condition":"Is the policy at least 5 years old?","result":"No — the policy is 3 years old","explanation":"The policy does not meet the minimum tenure for standard surrender.","chunkId":"SURRPGM.cbl#2200-VALIDATE-SURRENDER"}],"outcome":"The surrender request is rejected because the policy has not reached the 5-year minimum tenure."}
+            """).formatted(CHUNK_REFERENCE_INSTRUCTION);
 
     private static final String DATA_DICTIONARY_SYSTEM_PROMPT = ("""
             You build a business data dictionary from COBOL data definitions (copybook \
@@ -253,6 +284,41 @@ public class BusinessInsightService {
             return List.of();
         } finally {
             metrics.stopLlmCall(sample, "decision_table");
+        }
+    }
+
+    /**
+     * Traces a concrete "what if" scenario (from {@code question}) through the
+     * retrieved decision logic. Only ever called when the question already looks
+     * like a scenario (see RagService.looksLikeScenarioQuestion) — the relevance
+     * gate in {@link #SCENARIO_TRACE_SYSTEM_PROMPT} is a safety net on top of that,
+     * not the primary gate, so this never runs for an ordinary question.
+     */
+    public ScenarioTrace extractScenarioTrace(String question, String answer, String contextBlock,
+                                               List<ChunkResult> chunks) {
+        Timer.Sample sample = metrics.startLlmCall();
+        try {
+            Set<String> validChunkIds = chunks.stream().map(ChunkResult::chunkId).collect(Collectors.toSet());
+            String userMessage = buildExtractionUserMessage(question, answer, contextBlock);
+            var response = chatModel.call(new Prompt(List.of(
+                    new SystemMessage(SCENARIO_TRACE_SYSTEM_PROMPT), new UserMessage(userMessage))));
+            String json = extractJsonObject(response.getResult().getOutput().getText());
+            ScenarioTrace trace = objectMapper.readValue(json, ScenarioTrace.class);
+            if (trace == null || trace.steps() == null || trace.steps().isEmpty()) {
+                return new ScenarioTrace(List.of(), null);
+            }
+            List<ScenarioStep> steps = trace.steps().stream()
+                    .filter(s -> s != null && s.condition() != null && !s.condition().isBlank())
+                    .map(s -> validChunkIds.contains(s.chunkId()) ? s
+                            : new ScenarioStep(s.condition(), s.result(), s.explanation(), null))
+                    .limit(8)
+                    .toList();
+            return new ScenarioTrace(steps, trace.outcome());
+        } catch (Exception e) {
+            metrics.recordLlmCallError("scenario_trace");
+            return new ScenarioTrace(List.of(), null);
+        } finally {
+            metrics.stopLlmCall(sample, "scenario_trace");
         }
     }
 
@@ -406,6 +472,14 @@ public class BusinessInsightService {
         int start = text.indexOf('[');
         int end = text.lastIndexOf(']');
         if (start == -1 || end == -1 || end < start) return "[]";
+        return text.substring(start, end + 1);
+    }
+
+    private String extractJsonObject(String text) {
+        if (text == null) return "{}";
+        int start = text.indexOf('{');
+        int end = text.lastIndexOf('}');
+        if (start == -1 || end == -1 || end < start) return "{}";
         return text.substring(start, end + 1);
     }
 }

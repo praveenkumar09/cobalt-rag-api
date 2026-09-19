@@ -13,6 +13,7 @@ public record AskResponse(
         List<DecisionTableRow> decisionTable,
         BusinessFlow businessFlow,
         List<DataDictionaryEntry> dataDictionary,
-        List<TechnicalRule> technicalRules
+        List<TechnicalRule> technicalRules,
+        ScenarioTrace scenarioTrace
 ) {
 }

@@ -9,6 +9,7 @@ import com.cobalt.rag.model.DataDictionaryEntry;
 import com.cobalt.rag.model.DecisionTableRow;
 import com.cobalt.rag.model.GraphRelationship;
 import com.cobalt.rag.model.ImpactAnalysis;
+import com.cobalt.rag.model.ScenarioTrace;
 import com.cobalt.rag.model.SourceCitation;
 import com.cobalt.rag.model.TechnicalRule;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -219,6 +220,16 @@ public class RagService {
             Pattern.CASE_INSENSITIVE
     );
 
+    // Gates the Scenario Simulator (extractScenarioTrace): only fires the extra
+    // LLM call when the question actually reads like a concrete "what if" —
+    // ordinary questions never pay for it. Same cost-gating pattern as
+    // CHANGE_REQUEST_WORD/looksLikeChangeRequest above.
+    private static final Pattern SCENARIO_QUESTION_PATTERN = Pattern.compile(
+            "\\bwhat\\s+(if|happens|would happen)\\b|\\bsuppose\\b|\\blet'?s say\\b|" +
+            "\\bwalk me through\\b|\\bsimulate\\b",
+            Pattern.CASE_INSENSITIVE
+    );
+
     public RagService(VectorSearchService vectorSearch,
                       GraphSearchService graphSearch,
                       ImpactAnalysisService impactAnalysisService,
@@ -251,7 +262,7 @@ public class RagService {
             metrics.recordAnswer("security_violation");
             String canned = cannedSecurityMessage(preFilterViolation);
             return new AskResponse(canned, List.of(), List.of(), 0, List.of(), null,
-                    List.of(), List.of(), null, List.of(), List.of());
+                    List.of(), List.of(), null, List.of(), List.of(), null);
         }
 
         // 1. Semantic search — retrieve top-K relevant code chunks from pgvector
@@ -284,6 +295,7 @@ public class RagService {
         BusinessFlow businessFlow = null;
         List<DataDictionaryEntry> dataDictionary = List.of();
         List<TechnicalRule> technicalRules = List.of();
+        ScenarioTrace scenarioTrace = null;
 
         try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
             // 3b. Impact analysis doesn't depend on the answer text — start it now, on
@@ -362,6 +374,12 @@ public class RagService {
                         () -> businessInsightService.extractDataDictionary(question, answer, contextBlock, chunks));
                 Future<List<TechnicalRule>> technicalRulesFuture = businessMode ? null : executor.submit(
                         () -> businessInsightService.extractTechnicalRules(question, answer, contextBlock, chunks));
+                // Scenario Simulator: only for business-mode questions that actually read
+                // like a concrete "what if" — see looksLikeScenarioQuestion. Ordinary
+                // business questions never pay for this extra LLM call.
+                Future<ScenarioTrace> scenarioFuture = (businessMode && looksLikeScenarioQuestion(question))
+                        ? executor.submit(() -> businessInsightService.extractScenarioTrace(question, answer, contextBlock, chunks))
+                        : null;
 
                 try {
                     if (rulesFuture != null) businessRules = rulesFuture.get();
@@ -369,6 +387,7 @@ public class RagService {
                     if (flowFuture != null) businessFlow = flowFuture.get();
                     dataDictionary = dictionaryFuture.get();
                     if (technicalRulesFuture != null) technicalRules = technicalRulesFuture.get();
+                    if (scenarioFuture != null) scenarioTrace = scenarioFuture.get();
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } catch (ExecutionException e) {
@@ -381,9 +400,12 @@ public class RagService {
         List<SourceCitation> sources = suppressExtras ? List.of() : toCitations(chunks);
         List<GraphRelationship> visibleGraphContext = suppressExtras ? List.of() : graphContext;
         List<String> followUps = suppressExtras ? List.of() : generateFollowUps(question, answer, contextBlock);
+        if (scenarioTrace != null && scenarioTrace.steps().isEmpty()) {
+            scenarioTrace = null;
+        }
 
         return new AskResponse(answer, sources, visibleGraphContext, chunks.size(), followUps, impactAnalysis,
-                businessRules, decisionTable, businessFlow, dataDictionary, technicalRules);
+                businessRules, decisionTable, businessFlow, dataDictionary, technicalRules, scenarioTrace);
     }
 
     /**
@@ -526,6 +548,7 @@ public class RagService {
             correction.put("businessFlow", null);
             correction.put("dataDictionary", List.of());
             correction.put("technicalRules", List.of());
+            correction.put("scenarioTrace", null);
             return Flux.just(toJson(correction));
         });
 
@@ -569,7 +592,17 @@ public class RagService {
                 return rules.isEmpty() ? null : toJson(Map.of("type", "technicalRules", "rules", rules));
             }).subscribeOn(Schedulers.boundedElastic());
 
-            return Flux.merge(followupMono, businessRulesMono, decisionTableMono, dataDictionaryMono, technicalRulesMono)
+            // Scenario Simulator: only for business-mode questions that actually read
+            // like a concrete "what if" — see looksLikeScenarioQuestion. Ordinary
+            // business questions never pay for this extra LLM call.
+            Mono<String> scenarioTraceMono = (!businessMode || !looksLikeScenarioQuestion(question))
+                    ? Mono.empty() : Mono.fromCallable(() -> {
+                ScenarioTrace trace = businessInsightService.extractScenarioTrace(question, answer, contextBlock, chunks);
+                return trace.steps().isEmpty() ? null : toJson(Map.of("type", "scenarioTrace", "trace", trace));
+            }).subscribeOn(Schedulers.boundedElastic());
+
+            return Flux.merge(followupMono, businessRulesMono, decisionTableMono, dataDictionaryMono,
+                            technicalRulesMono, scenarioTraceMono)
                     .filter(Objects::nonNull);
         });
 
@@ -774,6 +807,10 @@ public class RagService {
 
     private boolean looksLikeChangeRequest(String question) {
         return question != null && CHANGE_REQUEST_WORD.matcher(question).find();
+    }
+
+    private boolean looksLikeScenarioQuestion(String question) {
+        return question != null && SCENARIO_QUESTION_PATTERN.matcher(question).find();
     }
 
     /**
