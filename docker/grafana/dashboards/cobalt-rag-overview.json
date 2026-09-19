@@ -297,6 +297,76 @@
           "legendFormat": "rejections"
         }
       ]
+    },
+    {
+      "id": 22,
+      "type": "row",
+      "title": "Usage",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 56 }
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "Tech queries (all-time)",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 57 },
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "fieldConfig": { "defaults": { "decimals": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "rawSql": "SELECT COUNT(*) AS count FROM conversation_messages cm JOIN conversations c ON c.id = cm.conversation_id WHERE cm.role = 'user' AND c.view_mode = 'tech'",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "stat",
+      "title": "Business queries (all-time)",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 57 },
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "fieldConfig": { "defaults": { "decimals": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "rawSql": "SELECT COUNT(*) AS count FROM conversation_messages cm JOIN conversations c ON c.id = cm.conversation_id WHERE cm.role = 'user' AND c.view_mode = 'business'",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "type": "stat",
+      "title": "Tech vs business share",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 57 },
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "fieldConfig": { "defaults": { "unit": "percent", "decimals": 1 }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "rawSql": "SELECT 100.0 * COUNT(*) FILTER (WHERE c.view_mode = 'business') / GREATEST(COUNT(*), 1) AS count FROM conversation_messages cm JOIN conversations c ON c.id = cm.conversation_id WHERE cm.role = 'user'",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "Queries by mode over time",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 63 },
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "fieldConfig": { "defaults": { "decimals": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "rawSql": "SELECT date_trunc('day', cm.created_at) AS time, c.view_mode, COUNT(*) AS count FROM conversation_messages cm JOIN conversations c ON c.id = cm.conversation_id WHERE cm.role = 'user' GROUP BY 1, 2 ORDER BY 1",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

@@ -59,6 +59,9 @@ services:
   grafana:
     image: grafana/grafana:latest
     container_name: cobalt_grafana
+    networks:
+      - default
+      - cobalt-shared
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer

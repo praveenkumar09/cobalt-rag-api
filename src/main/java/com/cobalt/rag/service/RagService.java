@@ -289,9 +289,14 @@ public class RagService {
             // 3b. Impact analysis doesn't depend on the answer text — start it now, on
             // a virtual thread, so its (potentially slow) Neo4j traversal runs
             // concurrently with the main LLM call below instead of blocking ahead of it.
-            // Only the Tech view renders it, so Business-mode questions skip the call
-            // entirely rather than computing and then discarding it.
-            Future<ImpactAnalysis> impactFuture = businessMode ? null : executor.submit(() -> {
+            // The Tech chat view is still the only one that renders this inline
+            // (MessageBubble gates it on viewMode === 'tech'), but Business-mode
+            // messages need it too for the Change Impact Report export, so it's no
+            // longer skipped by view mode — only by looksLikeChangeRequest(question),
+            // same as before, so ordinary (non-change-request) questions in either
+            // mode still submit a virtual thread that returns immediately without
+            // touching Neo4j or the LLM — negligible added cost.
+            Future<ImpactAnalysis> impactFuture = executor.submit(() -> {
                 if (!looksLikeChangeRequest(question)) return null;
                 metrics.recordImpactAnalysisTriggered();
                 return impactAnalysisService.analyze(programIds);
@@ -423,9 +428,13 @@ public class RagService {
         // and pattern as businessFlowMono below: fire it now, on a background thread,
         // and tap the (likely-already-finished) result later as its own SSE event,
         // rather than blocking here and delaying the metadata event (and therefore
-        // the first token) behind a potentially-slow Neo4j traversal. Only the Tech
-        // view renders it, so Business-mode questions skip the call entirely.
-        Mono<ImpactAnalysis> impactAnalysisMono = businessMode ? Mono.empty() : Mono.fromCallable(() -> {
+        // the first token) behind a potentially-slow Neo4j traversal. The Tech chat
+        // view is still the only one that renders this inline, but Business-mode
+        // messages need it too for the Change Impact Report export, so it's no
+        // longer skipped by view mode — only by looksLikeChangeRequest(question),
+        // same as before, so ordinary questions in either mode resolve to null
+        // almost instantly without touching Neo4j or the LLM.
+        Mono<ImpactAnalysis> impactAnalysisMono = Mono.fromCallable(() -> {
                     if (!looksLikeChangeRequest(question)) return null;
                     metrics.recordImpactAnalysisTriggered();
                     return impactAnalysisService.analyze(programIds);
