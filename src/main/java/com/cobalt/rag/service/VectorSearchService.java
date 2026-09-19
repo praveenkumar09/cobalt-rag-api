@@ -35,7 +35,7 @@ public class VectorSearchService {
     private static final String SIMILARITY_SQL = """
             SELECT chunk_id, source_file, program_id, domain, sub_domain,
                    section_name, section_purpose, content, file_type,
-                   line_start, line_end,
+                   line_start, line_end, key_data_fields,
                    1 - (embedding <=> ?::vector) AS similarity
             FROM chunks
             WHERE embedding IS NOT NULL AND should_embed = true
@@ -88,7 +88,8 @@ public class VectorSearchService {
                         rs.getString("file_type"),
                         nullableInt(rs, "line_start"),
                         nullableInt(rs, "line_end"),
-                        rs.getDouble("similarity")
+                        rs.getDouble("similarity"),
+                        nullableStringList(rs, "key_data_fields")
                 ),
                 vectorStr, vectorStr, topK
         );
@@ -160,6 +161,17 @@ public class VectorSearchService {
     private static Integer nullableInt(ResultSet rs, String column) throws SQLException {
         int value = rs.getInt(column);
         return rs.wasNull() ? null : value;
+    }
+
+    private static List<String> nullableStringList(ResultSet rs, String column) throws SQLException {
+        java.sql.Array array = rs.getArray(column);
+        if (array == null) return null;
+        Object[] elements = (Object[]) array.getArray();
+        List<String> result = new java.util.ArrayList<>(elements.length);
+        for (Object e : elements) {
+            if (e != null) result.add(e.toString());
+        }
+        return result.isEmpty() ? null : result;
     }
 
     private static String toVectorString(float[] vec) {

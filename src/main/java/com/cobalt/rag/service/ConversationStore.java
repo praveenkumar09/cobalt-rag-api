@@ -89,22 +89,27 @@ public class ConversationStore {
                 ADD COLUMN IF NOT EXISTS current_leaf_id TEXT
                 """);
         jdbc.execute("""
+                ALTER TABLE conversations
+                ADD COLUMN IF NOT EXISTS view_mode TEXT NOT NULL DEFAULT 'tech'
+                """);
+        jdbc.execute("""
                 CREATE INDEX IF NOT EXISTS idx_conversation_messages_parent
                 ON conversation_messages (parent_id)
                 """);
     }
 
     public void upsertMessage(String clientId, String conversationId, String messageId,
-                               String role, String content, JsonNode payload, String parentId) {
+                               String role, String content, JsonNode payload, String parentId, String viewMode) {
         Integer exists = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM conversations WHERE id = ? AND client_id = ?",
                 Integer.class, conversationId, clientId);
 
         if (exists == null || exists == 0) {
+            String resolvedViewMode = "business".equals(viewMode) ? "business" : "tech";
             jdbc.update(
-                    "INSERT INTO conversations (id, client_id, title) VALUES (?, ?, ?) " +
+                    "INSERT INTO conversations (id, client_id, title, view_mode) VALUES (?, ?, ?, ?) " +
                             "ON CONFLICT (id) DO NOTHING",
-                    conversationId, clientId, deriveTitle(role, content));
+                    conversationId, clientId, deriveTitle(role, content), resolvedViewMode);
         }
 
         String payloadJson = (payload == null || payload.isNull()) ? null : payload.toString();
@@ -146,19 +151,22 @@ public class ConversationStore {
     }
 
     public Optional<ConversationDetail> getConversation(String clientId, String conversationId) {
-        List<String> titles = jdbc.query(
-                "SELECT title FROM conversations WHERE id = ? AND client_id = ? AND " + EXPIRY_CLAUSE,
-                (rs, rowNum) -> rs.getString("title"),
+        List<TitleAndMode> rows = jdbc.query(
+                "SELECT title, view_mode FROM conversations WHERE id = ? AND client_id = ? AND " + EXPIRY_CLAUSE,
+                (rs, rowNum) -> new TitleAndMode(rs.getString("title"), rs.getString("view_mode")),
                 conversationId, clientId
         );
-        if (titles.isEmpty()) {
+        if (rows.isEmpty()) {
             return Optional.empty();
         }
 
         String currentLeafId = queryCurrentLeafId(clientId, conversationId);
         List<ConversationMessageDto> messages = buildActivePath(conversationId, currentLeafId);
 
-        return Optional.of(new ConversationDetail(conversationId, titles.get(0), messages));
+        return Optional.of(new ConversationDetail(conversationId, rows.get(0).title(), rows.get(0).viewMode(), messages));
+    }
+
+    private record TitleAndMode(String title, String viewMode) {
     }
 
     /**

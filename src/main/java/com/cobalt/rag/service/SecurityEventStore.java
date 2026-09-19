@@ -31,7 +31,10 @@ public class SecurityEventStore {
 
     private final JdbcTemplate jdbc;
 
-    public SecurityEventStore(JdbcTemplate jdbc) {
+    // Unused beyond ordering: security_events.user_id has a FK to users(id) —
+    // see FeedbackStore's constructor for why this dependency is needed to
+    // guarantee AuthStore creates the users table first on a fresh database.
+    public SecurityEventStore(JdbcTemplate jdbc, AuthStore authStore) {
         this.jdbc = jdbc;
     }
 

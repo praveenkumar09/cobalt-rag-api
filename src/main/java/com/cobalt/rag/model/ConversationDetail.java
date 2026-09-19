@@ -5,6 +5,7 @@ import java.util.List;
 public record ConversationDetail(
         String id,
         String title,
+        String viewMode,
         List<ConversationMessageDto> messages
 ) {
 }

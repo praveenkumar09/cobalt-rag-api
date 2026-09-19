@@ -15,6 +15,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Given the program(s) a recommended code change touches, finds every other
@@ -62,6 +63,17 @@ public class ImpactAnalysisService {
             RETURN a.id AS fromId, b.id AS toId
             """;
 
+    // Of the candidate nodes found by REACHES_ROOTS_QUERY, which ones actually
+    // define or reference at least one of the specific field(s) the change
+    // discusses — as opposed to merely being structurally reachable (e.g.
+    // sharing a copybook without ever touching that field). Used to narrow a
+    // pure-reachability result down to real, field-level impact.
+    private static final String FIELD_RELEVANT_QUERY = """
+            MATCH (n)-[:DEFINES|REFERENCES]->(f:FIELD)
+            WHERE n.id IN $candidateIds AND f.id IN $fieldIds
+            RETURN DISTINCT n.id AS id
+            """;
+
     private final Driver driver;
 
     public ImpactAnalysisService(Driver driver) {
@@ -69,6 +81,24 @@ public class ImpactAnalysisService {
     }
 
     public ImpactAnalysis analyze(List<String> seedProgramIds) {
+        return analyze(seedProgramIds, Set.of());
+    }
+
+    /**
+     * Same as {@link #analyze(List)}, but when {@code fieldNames} is non-empty,
+     * narrows the result to candidate nodes that actually DEFINE or REFERENCE at
+     * least one of those fields (per the FIELD graph edges written by the
+     * ingestor) — pure structural reachability (sharing a copybook, being a
+     * transitive caller) is no longer sufficient on its own. The seed program(s)
+     * and their own copybooks (tier 0) are always kept regardless of the field
+     * filter, since the program you asked about is trivially "impacted."
+     *
+     * Returns null if nothing survives the filter — the caller should treat that
+     * as "fall back to the unfiltered result," not "there is truly no impact":
+     * this can also mean the field name didn't match anything yet (e.g. the
+     * ingestor hasn't been re-run since the field was added to the source).
+     */
+    public ImpactAnalysis analyze(List<String> seedProgramIds, Set<String> fieldNames) {
         if (seedProgramIds == null || seedProgramIds.isEmpty()) {
             return null;
         }
@@ -84,14 +114,32 @@ public class ImpactAnalysisService {
 
             Set<String> rootIds = new LinkedHashSet<>(nodesById.keySet());
 
-            boolean truncated;
             var reached = session.run(REACHES_ROOTS_QUERY,
                     Map.of("rootIds", List.copyOf(rootIds), "limit", MAX_IMPACTED_NODES)).list();
-            reached.forEach(rec -> putNode(nodesById, rec));
-            truncated = reached.size() >= MAX_IMPACTED_NODES;
+            boolean truncated = reached.size() >= MAX_IMPACTED_NODES;
+
+            Map<String, ImpactedNode> candidates = new HashMap<>();
+            reached.forEach(rec -> putNode(candidates, rec));
+
+            Set<String> fieldIds = fieldNames == null ? Set.of() : fieldNames.stream()
+                    .filter(f -> f != null && !f.isBlank())
+                    .map(f -> f.trim().toUpperCase())
+                    .collect(Collectors.toSet());
+
+            if (!fieldIds.isEmpty() && !candidates.isEmpty()) {
+                var relevant = session.run(FIELD_RELEVANT_QUERY,
+                        Map.of("candidateIds", List.copyOf(candidates.keySet()), "fieldIds", List.copyOf(fieldIds))
+                ).list();
+                Set<String> relevantIds = new HashSet<>();
+                relevant.forEach(rec -> relevantIds.add(rec.get("id").asString("")));
+                candidates.keySet().retainAll(relevantIds);
+            }
+
+            candidates.forEach(nodesById::putIfAbsent);
 
             if (nodesById.size() <= rootIds.size()) {
-                // Nothing beyond the change target itself — no impact to show.
+                // Nothing beyond the change target itself — no impact to show
+                // (or, with a field filter applied, nothing field-relevant survived).
                 return null;
             }
 

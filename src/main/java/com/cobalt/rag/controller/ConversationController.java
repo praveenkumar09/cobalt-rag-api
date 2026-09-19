@@ -48,7 +48,7 @@ public class ConversationController {
         try {
             String userId = authStore.requireUserId(token);
             store.upsertMessage(userId, conversationId, messageId, request.role(), request.content(),
-                    request.payload(), request.parentId());
+                    request.payload(), request.parentId(), request.viewMode());
             return ResponseEntity.ok().build();
         } catch (AuthStore.InvalidCredentialsException e) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();

@@ -21,7 +21,14 @@ public class FeedbackStore {
 
     private final JdbcTemplate jdbc;
 
-    public FeedbackStore(JdbcTemplate jdbc) {
+    // Unused beyond ordering: feedback.user_id has a FK to users(id), so this
+    // constructor dependency forces Spring to fully initialize AuthStore
+    // (including its own @PostConstruct, which creates the users table) before
+    // this bean is constructed — otherwise, on a fresh database, bean creation
+    // order between two @Service classes that only depend on JdbcTemplate is
+    // unspecified, and this table's own @PostConstruct can run first and fail
+    // with "relation users does not exist".
+    public FeedbackStore(JdbcTemplate jdbc, AuthStore authStore) {
         this.jdbc = jdbc;
     }
 

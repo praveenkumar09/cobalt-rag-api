@@ -1,5 +1,7 @@
 package com.cobalt.rag.model;
 
+import java.util.List;
+
 public record ChunkResult(
         String chunkId,
         String sourceFile,
@@ -12,6 +14,7 @@ public record ChunkResult(
         String fileType,
         Integer lineStart,
         Integer lineEnd,
-        double similarity
+        double similarity,
+        List<String> keyDataFields
 ) {
 }

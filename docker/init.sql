@@ -63,9 +63,20 @@ CREATE INDEX IF NOT EXISTS idx_chunks_processing    ON chunks (processing_type);
 CREATE INDEX IF NOT EXISTS idx_chunks_should_embed  ON chunks (should_embed);
 CREATE INDEX IF NOT EXISTS idx_chunks_payload       ON chunks USING gin (payload);
 
--- ── HNSW vector index (better accuracy than IVFFlat, no pre-training needed)
-CREATE INDEX IF NOT EXISTS idx_chunks_embedding_hnsw
-    ON chunks USING hnsw (embedding vector_cosine_ops);
+-- No HNSW/approximate vector index: at this corpus size (low thousands of
+-- chunks), a plain sequential scan + exact cosine distance is already fast
+-- (single-digit ms) and always correct. An HNSW index here actively hurts
+-- correctness instead: pgvector's LIMIT-aware search-width sizing only
+-- applies when LIMIT is a literal known at plan time — cobalt-rag-api's
+-- similarity query binds LIMIT as a JDBC prepared-statement parameter, so
+-- every real query got the index's un-widened default ef_search, silently
+-- returning wrong (lower-similarity) top-K results instead of the true
+-- nearest neighbors. Confirmed directly: `PREPARE ... EXECUTE` with the
+-- index present missed the correct top match every time; the identical
+-- query as a plain literal (or with the index dropped) found it. Revisit
+-- only if the corpus grows into the hundreds of thousands of chunks, and
+-- if so, tune hnsw.ef_search explicitly rather than relying on the
+-- LIMIT-aware default.
 
 -- ── source_file index (for incremental delete before re-processing a file) ──
 CREATE INDEX IF NOT EXISTS idx_chunks_source_file ON chunks (source_file);
