@@ -54,11 +54,19 @@ public class OrderedOpenAiStreamClient {
     @Value("${spring.ai.openai.base-url:https://api.openai.com}")
     private String baseUrl;
 
-    @Value("${spring.ai.openai.chat.options.model:gpt-4o-mini}")
+    // No Java-side default on these three — application.properties is the only
+    // place that should ever define them (see its "OpenAI" section comment), so
+    // swapping/retiring a model is a one-line change there, never a hunt across
+    // classes. A missing property fails the app at startup instead of silently
+    // resurrecting a stale literal baked into code.
+    @Value("${spring.ai.openai.chat.options.model}")
     private String defaultModel;
 
-    @Value("${spring.ai.openai.chat.options.temperature:0.3}")
+    @Value("${spring.ai.openai.chat.options.temperature}")
     private double defaultTemperature;
+
+    @Value("${spring.ai.openai.chat.options.seed}")
+    private Integer seed;
 
     public OrderedOpenAiStreamClient(WebClient.Builder webClientBuilder) {
         this.webClient = webClientBuilder.build();
@@ -85,6 +93,7 @@ public class OrderedOpenAiStreamClient {
                 "model", defaultModel,
                 "stream", true,
                 "temperature", defaultTemperature,
+                "seed", seed,
                 "messages", messages
         );
 
