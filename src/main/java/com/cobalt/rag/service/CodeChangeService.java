@@ -93,7 +93,7 @@ public class CodeChangeService {
 
         String userMessage = buildUserMessage(programId, question, answer, source.get().content());
 
-        Flux<String> tokenFlux = orderedStreamClient.streamText(SYSTEM_PROMPT, userMessage)
+        Flux<String> tokenFlux = orderedStreamClient.streamText(SYSTEM_PROMPT, List.of(), userMessage)
         .mapNotNull(text -> {
             if (text == null || text.isEmpty()) return null;
             Map<String, String> payload = new LinkedHashMap<>();

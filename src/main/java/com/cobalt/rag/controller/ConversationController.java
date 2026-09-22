@@ -6,6 +6,7 @@ import com.cobalt.rag.model.ConversationSummary;
 import com.cobalt.rag.model.SelectBranchRequest;
 import com.cobalt.rag.model.UpsertMessageRequest;
 import com.cobalt.rag.service.AuthStore;
+import com.cobalt.rag.service.ChatMemoryService;
 import com.cobalt.rag.service.ConversationStore;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -25,10 +26,12 @@ public class ConversationController {
 
     private final ConversationStore store;
     private final AuthStore authStore;
+    private final ChatMemoryService chatMemoryService;
 
-    public ConversationController(ConversationStore store, AuthStore authStore) {
+    public ConversationController(ConversationStore store, AuthStore authStore, ChatMemoryService chatMemoryService) {
         this.store = store;
         this.authStore = authStore;
+        this.chatMemoryService = chatMemoryService;
     }
 
     /**
@@ -49,6 +52,11 @@ public class ConversationController {
             String userId = authStore.requireUserId(token);
             store.upsertMessage(userId, conversationId, messageId, request.role(), request.content(),
                     request.payload(), request.parentId(), request.viewMode());
+            // Natural single write point for both the user's question and the
+            // assistant's answer (the frontend PUTs each here right after
+            // RagService returns) — keeps the chat-memory cache in step with
+            // Postgres without a separate re-derivation pass on the next question.
+            chatMemoryService.appendTurn(userId, conversationId, request.role(), request.content());
             return ResponseEntity.ok().build();
         } catch (AuthStore.InvalidCredentialsException e) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();

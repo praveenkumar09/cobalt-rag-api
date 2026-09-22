@@ -93,4 +93,13 @@ public class RagMetrics {
                 .register(registry)
                 .increment();
     }
+
+    /** @param hit true if recent-turn chat history was served from Redis, false if it fell back to Postgres. */
+    public void recordChatMemoryCacheResult(boolean hit) {
+        Counter.builder("rag.chat_memory.cache")
+                .description("Chat-memory recent-turn lookups, tagged by whether Redis had a warm cache")
+                .tag("result", hit ? "hit" : "miss")
+                .register(registry)
+                .increment();
+    }
 }

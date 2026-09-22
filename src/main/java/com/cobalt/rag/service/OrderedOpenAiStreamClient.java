@@ -1,5 +1,6 @@
 package com.cobalt.rag.service;
 
+import com.cobalt.rag.model.ChatTurn;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
@@ -8,6 +9,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -62,16 +64,28 @@ public class OrderedOpenAiStreamClient {
         this.webClient = webClientBuilder.build();
     }
 
-    /** Streams the assistant's reply text, delta by delta, in guaranteed original order. */
-    public Flux<String> streamText(String systemPrompt, String userMessage) {
+    /**
+     * Streams the assistant's reply text, delta by delta, in guaranteed original order.
+     *
+     * @param history prior turns to inject for multi-turn context (see ChatMemoryService),
+     *                empty for a stateless call — inserted between the system prompt and
+     *                the current user message. Only changes what's sent to OpenAI; the
+     *                strictly-sequential response decode path this class exists for
+     *                (see class Javadoc) is unaffected.
+     */
+    public Flux<String> streamText(String systemPrompt, List<ChatTurn> history, String userMessage) {
+        List<Map<String, String>> messages = new ArrayList<>();
+        messages.add(Map.of("role", "system", "content", systemPrompt));
+        for (ChatTurn turn : history) {
+            messages.add(Map.of("role", turn.role(), "content", turn.content()));
+        }
+        messages.add(Map.of("role", "user", "content", userMessage));
+
         Map<String, Object> body = Map.of(
                 "model", defaultModel,
                 "stream", true,
                 "temperature", defaultTemperature,
-                "messages", List.of(
-                        Map.of("role", "system", "content", systemPrompt),
-                        Map.of("role", "user", "content", userMessage)
-                )
+                "messages", messages
         );
 
         return webClient.post()

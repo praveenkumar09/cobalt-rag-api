@@ -64,6 +64,14 @@
             <artifactId>spring-boot-starter-jdbc</artifactId>
         </dependency>
 
+        <!-- Redis — session cache, distributed ask rate limiter, and chat-memory
+             cache (cache-aside in front of Postgres in each case; see AuthStore,
+             AskRateLimiter, ChatMemoryService). Lettuce is the default client. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
         <!--
             Password hashing only (BCryptPasswordEncoder) — deliberately NOT
             spring-boot-starter-security, which would auto-configure a security

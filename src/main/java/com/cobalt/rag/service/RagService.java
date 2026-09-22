@@ -3,6 +3,7 @@ package com.cobalt.rag.service;
 import com.cobalt.rag.model.AskResponse;
 import com.cobalt.rag.model.BusinessFlow;
 import com.cobalt.rag.model.BusinessRule;
+import com.cobalt.rag.model.ChatTurn;
 import com.cobalt.rag.model.ChunkResult;
 import com.cobalt.rag.model.CorpusSample;
 import com.cobalt.rag.model.DataDictionaryEntry;
@@ -15,6 +16,8 @@ import com.cobalt.rag.model.TechnicalRule;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.Timer;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
@@ -30,6 +33,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -62,6 +66,7 @@ public class RagService {
     private final RagMetrics metrics;
     private final SecurityEventStore securityEventStore;
     private final SecurityPreFilter securityPreFilter;
+    private final ChatMemoryService chatMemoryService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // Loads a prompt body from src/main/resources/prompts/ — kept as plain text
@@ -238,7 +243,8 @@ public class RagService {
                       OrderedOpenAiStreamClient orderedStreamClient,
                       RagMetrics metrics,
                       SecurityEventStore securityEventStore,
-                      SecurityPreFilter securityPreFilter) {
+                      SecurityPreFilter securityPreFilter,
+                      ChatMemoryService chatMemoryService) {
         this.vectorSearch = vectorSearch;
         this.graphSearch  = graphSearch;
         this.impactAnalysisService = impactAnalysisService;
@@ -248,10 +254,26 @@ public class RagService {
         this.metrics = metrics;
         this.securityEventStore = securityEventStore;
         this.securityPreFilter = securityPreFilter;
+        this.chatMemoryService = chatMemoryService;
     }
 
-    public AskResponse ask(String question, String userId, String viewMode) {
+    /**
+     * Prior turns for this conversation, for injection into the main answer's
+     * prompt — auth-only (matches how ConversationStore already scopes chat
+     * history by authenticated user): anonymous callers or questions with no
+     * conversationId get no history, identical to pre-chat-memory behavior.
+     * Never throws — see ChatMemoryService.
+     */
+    private List<ChatTurn> resolveHistory(String userId, String conversationId) {
+        if (userId == null || conversationId == null || conversationId.isBlank()) {
+            return List.of();
+        }
+        return chatMemoryService.recentTurns(userId, conversationId);
+    }
+
+    public AskResponse ask(String question, String userId, String viewMode, String conversationId) {
         boolean businessMode = "business".equals(viewMode);
+        List<ChatTurn> history = resolveHistory(userId, conversationId);
         // 0. Deterministic regex/deny-list backstop, checked BEFORE any retrieval or
         // LLM call — see SecurityPreFilter's Javadoc for why this exists alongside
         // the LLM's own judgment. Short-circuiting here also saves the cost of a
@@ -317,12 +339,16 @@ public class RagService {
             // 6. Call LLM
             Timer.Sample answerSample = metrics.startLlmCall();
             try {
-                var response = chatModel.call(
-                        new Prompt(List.of(
-                                new SystemMessage(businessMode ? BUSINESS_SYSTEM_PROMPT : SYSTEM_PROMPT),
-                                new UserMessage(userMessage)
-                        ))
-                );
+                List<Message> promptMessages = new ArrayList<>();
+                promptMessages.add(new SystemMessage(businessMode ? BUSINESS_SYSTEM_PROMPT : SYSTEM_PROMPT));
+                for (ChatTurn turn : history) {
+                    promptMessages.add("assistant".equals(turn.role())
+                            ? new AssistantMessage(turn.content())
+                            : new UserMessage(turn.content()));
+                }
+                promptMessages.add(new UserMessage(userMessage));
+
+                var response = chatModel.call(new Prompt(promptMessages));
                 answer = response.getResult().getOutput().getText();
             } finally {
                 metrics.stopLlmCall(answerSample, "answer");
@@ -414,8 +440,9 @@ public class RagService {
      *   N events  : JSON tokens    { type:"token", content:"..." }
      *   Last event: "[DONE]"
      */
-    public Flux<String> askStream(String question, String userId, String viewMode) {
+    public Flux<String> askStream(String question, String userId, String viewMode, String conversationId) {
         boolean businessMode = "business".equals(viewMode);
+        List<ChatTurn> history = resolveHistory(userId, conversationId);
         // 0. Same deterministic backstop as ask() — see its comment above.
         String preFilterViolation = checkPreFilter(question);
         if (preFilterViolation != null) {
@@ -500,7 +527,7 @@ public class RagService {
         StringBuilder fullAnswer = new StringBuilder();
         AtomicReference<Timer.Sample> answerStreamSample = new AtomicReference<>();
         Flux<String> tokenFlux = orderedStreamClient.streamText(
-                businessMode ? BUSINESS_SYSTEM_PROMPT : SYSTEM_PROMPT, userMessage)
+                businessMode ? BUSINESS_SYSTEM_PROMPT : SYSTEM_PROMPT, history, userMessage)
         .doOnSubscribe(sub -> answerStreamSample.set(metrics.startLlmCall()))
         .doFinally(signal -> {
             Timer.Sample sample = answerStreamSample.get();

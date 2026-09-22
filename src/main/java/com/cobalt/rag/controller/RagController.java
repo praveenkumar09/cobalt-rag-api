@@ -88,7 +88,7 @@ public class RagController {
             metrics.recordRateLimitExceeded();
             return Flux.error(new RateLimitExceededException());
         }
-        return ragService.askStream(request.question().trim(), userId, request.resolvedViewMode());
+        return ragService.askStream(request.question().trim(), userId, request.resolvedViewMode(), request.conversationId());
     }
 
     /**
@@ -152,7 +152,7 @@ public class RagController {
             metrics.recordRateLimitExceeded();
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build();
         }
-        return ResponseEntity.ok(ragService.ask(request.question().trim(), userId, request.resolvedViewMode()));
+        return ResponseEntity.ok(ragService.ask(request.question().trim(), userId, request.resolvedViewMode(), request.conversationId()));
     }
 
     /**

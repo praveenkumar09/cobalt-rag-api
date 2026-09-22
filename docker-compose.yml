@@ -23,6 +23,9 @@ services:
     networks:
       - default
       - cobalt-shared
+    depends_on:
+      redis:
+        condition: service_healthy
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/ingestor
@@ -31,6 +34,8 @@ services:
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USER: neo4j
       NEO4J_PASS: admin
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
       # No -Xmx was set before, so the JVM defaulted to 25% of whatever memory
       # it could see — fine normally, but worth pinning explicitly now that a
       # hard container memory ceiling exists below (limits.memory), so the
@@ -59,6 +64,40 @@ services:
       timeout: 10s
       retries: 10
       start_period: 90s
+
+  # ── Redis ─────────────────────────────────────────────────────────────────────
+  # Cache-aside only: token→userId session lookups (AuthStore), the /api/ask
+  # rate limiter (AskRateLimiter), and capped recent-turn chat history for
+  # prompt injection (ChatMemoryService). Postgres stays the source of truth
+  # for sessions/conversations in every case, so losing this volume just means
+  # a cold cache next boot, never data loss — AOF is enabled anyway so a plain
+  # restart doesn't force every caller through Postgres/an unthrottled window
+  # all at once.
+  redis:
+    image: redis:7-alpine
+    container_name: cobalt_redis
+    command: >
+      redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    networks:
+      - default
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
 
   # ── Prometheus ────────────────────────────────────────────────────────────────
   prometheus:
@@ -109,3 +148,4 @@ services:
 volumes:
   prometheus_data:
   grafana_data:
+  redis_data:
