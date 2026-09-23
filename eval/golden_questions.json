@@ -1,0 +1,142 @@
+[
+  {
+    "id": "surr-eligibility",
+    "question": "How is a policy's surrender value calculated?",
+    "viewMode": "tech",
+    "expectedProgramIds": ["INTLFBO"],
+    "expectedKeywords": ["surrender", "policy"]
+  },
+  {
+    "id": "claims-functionality",
+    "question": "What is the functionality of claims processing?",
+    "viewMode": "tech",
+    "expectedProgramIds": ["CLMPRC"],
+    "expectedKeywords": ["claim", "policy", "approve"]
+  },
+  {
+    "id": "claims-rejection-lapsed",
+    "question": "How is a claim rejected if the policy is lapsed?",
+    "viewMode": "business",
+    "expectedProgramIds": ["CLMPRC"],
+    "expectedKeywords": ["lapsed", "reject"]
+  },
+  {
+    "id": "beneficiary-allocation",
+    "question": "How does BNFUPD validate beneficiary allocation percentages?",
+    "viewMode": "business",
+    "expectedProgramIds": ["BNFUPD"],
+    "expectedKeywords": ["allocation", "100", "primary"]
+  },
+  {
+    "id": "interest-calc",
+    "question": "What does CBACT04C do when calculating interest rates?",
+    "viewMode": "tech",
+    "expectedProgramIds": ["CBACT04C"],
+    "expectedKeywords": ["interest", "rate"]
+  },
+  {
+    "id": "user-mgmt",
+    "question": "How does COUSR00C manage user records?",
+    "viewMode": "tech",
+    "expectedProgramIds": ["COUSR00C"],
+    "expectedKeywords": ["user"]
+  },
+  {
+    "id": "card-txn-update",
+    "question": "What happens when a credit card transaction is updated in COTRTUPC?",
+    "viewMode": "tech",
+    "expectedProgramIds": ["COTRTUPC"],
+    "expectedKeywords": ["transaction"]
+  },
+  {
+    "id": "account-update",
+    "question": "How does COACTUPC update account information?",
+    "viewMode": "tech",
+    "expectedProgramIds": ["COACTUPC"],
+    "expectedKeywords": ["account"]
+  },
+  {
+    "id": "card-update-validation",
+    "question": "What validation does COCRDUPC perform on credit card updates?",
+    "viewMode": "tech",
+    "expectedProgramIds": ["COCRDUPC"],
+    "expectedKeywords": ["card"]
+  },
+  {
+    "id": "premium-calc",
+    "question": "How does PREMINQ calculate premium amounts?",
+    "viewMode": "tech",
+    "expectedProgramIds": ["PREMINQ"],
+    "expectedKeywords": ["premium"]
+  },
+  {
+    "id": "policy-renewal",
+    "question": "What is the process for policy renewal in POLRNWL?",
+    "viewMode": "business",
+    "expectedProgramIds": ["POLRNWL"],
+    "expectedKeywords": ["renewal", "policy"]
+  },
+  {
+    "id": "intlfbo-callers",
+    "question": "Which programs call INTLFBO?",
+    "viewMode": "tech",
+    "expectedProgramIds": [],
+    "expectedKeywords": []
+  },
+  {
+    "id": "plcyrec-fields",
+    "question": "What fields are defined in PLCYREC?",
+    "viewMode": "tech",
+    "expectedProgramIds": ["PLCYREC"],
+    "expectedKeywords": ["field"]
+  },
+  {
+    "id": "clmprc-copybooks",
+    "question": "What copybooks does CLMPRC use?",
+    "viewMode": "tech",
+    "expectedProgramIds": ["CLMPRC"],
+    "expectedKeywords": []
+  },
+  {
+    "id": "cbtrn02c-failed-validation",
+    "question": "How does CBTRN02C process a transaction that fails validation?",
+    "viewMode": "tech",
+    "expectedProgramIds": ["CBTRN02C"],
+    "expectedKeywords": ["transaction", "reject"]
+  },
+  {
+    "id": "cvtra05y-purpose",
+    "question": "What is the functionality of the CVTRA05Y copybook?",
+    "viewMode": "tech",
+    "expectedProgramIds": ["CVTRA05Y"],
+    "expectedKeywords": []
+  },
+  {
+    "id": "bill-payment",
+    "question": "How does COBIL00C handle bill payment processing?",
+    "viewMode": "business",
+    "expectedProgramIds": ["COBIL00C"],
+    "expectedKeywords": ["bill", "payment"]
+  },
+  {
+    "id": "surrender-error-handling",
+    "question": "What error handling exists in INTLFBO for surrender calculations?",
+    "viewMode": "tech",
+    "expectedProgramIds": ["INTLFBO"],
+    "expectedKeywords": ["surrender"]
+  },
+  {
+    "id": "signon-mgmt",
+    "question": "How does COSGN00C manage user sign-on?",
+    "viewMode": "tech",
+    "expectedProgramIds": ["COSGN00C"],
+    "expectedKeywords": ["sign"]
+  },
+  {
+    "id": "cbact01c-purpose",
+    "question": "What does the CBACT01C program do?",
+    "viewMode": "tech",
+    "expectedProgramIds": ["CBACT01C"],
+    "expectedKeywords": []
+  }
+]

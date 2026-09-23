@@ -1,0 +1,434 @@
+{
+  "timestamp": "20260922T224759Z",
+  "label": "after-all-fixes",
+  "baseUrl": "http://localhost:8083",
+  "score": {
+    "passed": 20,
+    "total": 20,
+    "avgLatencySeconds": 15.7
+  },
+  "results": [
+    {
+      "id": "surr-eligibility",
+      "question": "How is a policy's surrender value calculated?",
+      "pass": true,
+      "chunksRetrieved": 1,
+      "expectedProgramIds": [
+        "INTLFBO"
+      ],
+      "actualProgramIds": [
+        "INTLFBO"
+      ],
+      "programHit": true,
+      "keywordHits": [
+        "surrender",
+        "policy"
+      ],
+      "keywordTotal": 2,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 12.91,
+      "answerPreview": "The surrender value of a policy is calculated by determining the cash value, applying a surrender factor based on the policy's age, and accounting for any outstanding loan balance."
+    },
+    {
+      "id": "claims-functionality",
+      "question": "What is the functionality of claims processing?",
+      "pass": true,
+      "chunksRetrieved": 5,
+      "expectedProgramIds": [
+        "CLMPRC"
+      ],
+      "actualProgramIds": [
+        "CLMPRC"
+      ],
+      "programHit": true,
+      "keywordHits": [
+        "claim",
+        "policy",
+        "approve"
+      ],
+      "keywordTotal": 3,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 15.39,
+      "answerPreview": "The claims processing functionality in the CLMPRC program involves reading and validating insurance claims in a batch mode, calculating approved amounts, updating claim statuses, a"
+    },
+    {
+      "id": "claims-rejection-lapsed",
+      "question": "How is a claim rejected if the policy is lapsed?",
+      "pass": true,
+      "chunksRetrieved": 2,
+      "expectedProgramIds": [
+        "CLMPRC"
+      ],
+      "actualProgramIds": [
+        "CLMPRC"
+      ],
+      "programHit": true,
+      "keywordHits": [
+        "lapsed",
+        "reject"
+      ],
+      "keywordTotal": 2,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 15.55,
+      "answerPreview": "When a claim is submitted for processing, the system first validates the associated policy to determine its status. If the policy is found to be lapsed, the claim is automatically "
+    },
+    {
+      "id": "beneficiary-allocation",
+      "question": "How does BNFUPD validate beneficiary allocation percentages?",
+      "pass": true,
+      "chunksRetrieved": 1,
+      "expectedProgramIds": [
+        "BNFUPD"
+      ],
+      "actualProgramIds": [
+        "BNFUPD"
+      ],
+      "programHit": true,
+      "keywordHits": [
+        "allocation",
+        "100",
+        "primary"
+      ],
+      "keywordTotal": 3,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 28.76,
+      "answerPreview": "The BNFUPD program is responsible for validating the allocation percentages assigned to primary and contingent beneficiaries of an insurance policy. This validation is crucial to e"
+    },
+    {
+      "id": "interest-calc",
+      "question": "What does CBACT04C do when calculating interest rates?",
+      "pass": true,
+      "chunksRetrieved": 3,
+      "expectedProgramIds": [
+        "CBACT04C"
+      ],
+      "actualProgramIds": [
+        "CBACT04C"
+      ],
+      "programHit": true,
+      "keywordHits": [
+        "interest",
+        "rate"
+      ],
+      "keywordTotal": 2,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 16.68,
+      "answerPreview": "The CBACT04C program calculates monthly interest for various transaction category balances using a specified interest rate. It retrieves the interest rate from the DISCGRP-FILE, co"
+    },
+    {
+      "id": "user-mgmt",
+      "question": "How does COUSR00C manage user records?",
+      "pass": true,
+      "chunksRetrieved": 5,
+      "expectedProgramIds": [
+        "COUSR00C"
+      ],
+      "actualProgramIds": [
+        "COUSR00C"
+      ],
+      "programHit": true,
+      "keywordHits": [
+        "user"
+      ],
+      "keywordTotal": 1,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 13.22,
+      "answerPreview": "The COUSR00C program manages user records by initializing user data, reading user security information from a file, and populating user details into a structured data format. It ha"
+    },
+    {
+      "id": "card-txn-update",
+      "question": "What happens when a credit card transaction is updated in COTRTUPC?",
+      "pass": true,
+      "chunksRetrieved": 4,
+      "expectedProgramIds": [
+        "COTRTUPC"
+      ],
+      "actualProgramIds": [
+        "COTRTUPC"
+      ],
+      "programHit": true,
+      "keywordHits": [
+        "transaction"
+      ],
+      "keywordTotal": 1,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 12.71,
+      "answerPreview": "The COTRTUPC program processes updates to credit card transaction types by moving new values into the appropriate fields, executing an SQL update to the database, and handling any "
+    },
+    {
+      "id": "account-update",
+      "question": "How does COACTUPC update account information?",
+      "pass": true,
+      "chunksRetrieved": 5,
+      "expectedProgramIds": [
+        "COACTUPC"
+      ],
+      "actualProgramIds": [
+        "COACTUPC"
+      ],
+      "programHit": true,
+      "keywordHits": [
+        "account"
+      ],
+      "keywordTotal": 1,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 20.43,
+      "answerPreview": "The COACTUPC program updates account information by retrieving the current account and customer records, validating the new data against specific flags, and then applying the updat"
+    },
+    {
+      "id": "card-update-validation",
+      "question": "What validation does COCRDUPC perform on credit card updates?",
+      "pass": true,
+      "chunksRetrieved": 5,
+      "expectedProgramIds": [
+        "COCRDUPC"
+      ],
+      "actualProgramIds": [
+        "COCRDUPC"
+      ],
+      "programHit": true,
+      "keywordHits": [
+        "card"
+      ],
+      "keywordTotal": 1,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 14.33,
+      "answerPreview": "The COCRDUPC program performs several validations on credit card updates to ensure data integrity and compliance with banking standards. It checks the validity of the credit card n"
+    },
+    {
+      "id": "premium-calc",
+      "question": "How does PREMINQ calculate premium amounts?",
+      "pass": true,
+      "chunksRetrieved": 5,
+      "expectedProgramIds": [
+        "PREMINQ"
+      ],
+      "actualProgramIds": [
+        "PREMINQ"
+      ],
+      "programHit": true,
+      "keywordHits": [
+        "premium"
+      ],
+      "keywordTotal": 1,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 14.23,
+      "answerPreview": "The PREMINQ program calculates premium amounts by first determining a base premium based on the type of insurance policy and the coverage amount. It then adjusts this base premium "
+    },
+    {
+      "id": "policy-renewal",
+      "question": "What is the process for policy renewal in POLRNWL?",
+      "pass": true,
+      "chunksRetrieved": 5,
+      "expectedProgramIds": [
+        "POLRNWL"
+      ],
+      "actualProgramIds": [
+        "POLRNWL"
+      ],
+      "programHit": true,
+      "keywordHits": [
+        "renewal",
+        "policy"
+      ],
+      "keywordTotal": 2,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 18.28,
+      "answerPreview": "The policy renewal process in the POLRNWL program is designed to manage and facilitate the timely renewal of insurance policies. This batch processing operation ensures that active"
+    },
+    {
+      "id": "intlfbo-callers",
+      "question": "Which programs call INTLFBO?",
+      "pass": true,
+      "chunksRetrieved": 5,
+      "expectedProgramIds": [],
+      "actualProgramIds": [
+        "INTLFBO"
+      ],
+      "programHit": true,
+      "keywordHits": [],
+      "keywordTotal": 0,
+      "keywordRatio": 1.0,
+      "outOfScope": true,
+      "elapsedSeconds": 8.84,
+      "answerPreview": "The retrieved context does not provide information about which programs call the INTLFBO program. Therefore, I cannot provide an answer regarding the calling programs.\n\n\"Hi, I'm Or"
+    },
+    {
+      "id": "plcyrec-fields",
+      "question": "What fields are defined in PLCYREC?",
+      "pass": true,
+      "chunksRetrieved": 1,
+      "expectedProgramIds": [
+        "PLCYREC"
+      ],
+      "actualProgramIds": [
+        "PLCYREC"
+      ],
+      "programHit": true,
+      "keywordHits": [
+        "field"
+      ],
+      "keywordTotal": 1,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 19.76,
+      "answerPreview": "The PLCYREC copybook defines a comprehensive set of fields related to insurance policies, capturing essential details for effective policy management.\n\n**Business Context:**\nThis s"
+    },
+    {
+      "id": "clmprc-copybooks",
+      "question": "What copybooks does CLMPRC use?",
+      "pass": true,
+      "chunksRetrieved": 5,
+      "expectedProgramIds": [
+        "CLMPRC"
+      ],
+      "actualProgramIds": [
+        "CLMPRC",
+        "PLCYINQ",
+        "PLCYREC"
+      ],
+      "programHit": true,
+      "keywordHits": [],
+      "keywordTotal": 0,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 7.87,
+      "answerPreview": "The CLMPRC program utilizes the following copybooks:\n\n- **CLMREC**: This copybook is included in the claims master file section, which likely defines the structure for claims recor"
+    },
+    {
+      "id": "cbtrn02c-failed-validation",
+      "question": "How does CBTRN02C process a transaction that fails validation?",
+      "pass": true,
+      "chunksRetrieved": 4,
+      "expectedProgramIds": [
+        "CBTRN02C"
+      ],
+      "actualProgramIds": [
+        "CBTRN02C"
+      ],
+      "programHit": true,
+      "keywordHits": [
+        "transaction",
+        "reject"
+      ],
+      "keywordTotal": 2,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 23.24,
+      "answerPreview": "When the CBTRN02C program encounters a transaction that fails validation, it processes the rejected transaction by moving relevant data into a designated reject record format and w"
+    },
+    {
+      "id": "cvtra05y-purpose",
+      "question": "What is the functionality of the CVTRA05Y copybook?",
+      "pass": true,
+      "chunksRetrieved": 1,
+      "expectedProgramIds": [
+        "CVTRA05Y"
+      ],
+      "actualProgramIds": [
+        "CVTRA05Y"
+      ],
+      "programHit": true,
+      "keywordHits": [],
+      "keywordTotal": 0,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 11.08,
+      "answerPreview": "The CVTRA05Y copybook defines a structured data format for capturing and managing transaction details within the banking domain. It includes fields for transaction identification, "
+    },
+    {
+      "id": "bill-payment",
+      "question": "How does COBIL00C handle bill payment processing?",
+      "pass": true,
+      "chunksRetrieved": 4,
+      "expectedProgramIds": [
+        "COBIL00C"
+      ],
+      "actualProgramIds": [
+        "COBIL00C"
+      ],
+      "programHit": true,
+      "keywordHits": [
+        "bill",
+        "payment"
+      ],
+      "keywordTotal": 2,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 15.66,
+      "answerPreview": "The COBIL00C program is designed to facilitate online bill payments within a banking card management system. It processes user inputs related to bill payments, ensuring that transa"
+    },
+    {
+      "id": "surrender-error-handling",
+      "question": "What error handling exists in INTLFBO for surrender calculations?",
+      "pass": true,
+      "chunksRetrieved": 3,
+      "expectedProgramIds": [
+        "INTLFBO"
+      ],
+      "actualProgramIds": [
+        "INTLFBO"
+      ],
+      "programHit": true,
+      "keywordHits": [
+        "surrender"
+      ],
+      "keywordTotal": 1,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 15.15,
+      "answerPreview": "The INTLFBO program includes an error handling section that captures and displays error information related to system or file access issues during policy management processes, incl"
+    },
+    {
+      "id": "signon-mgmt",
+      "question": "How does COSGN00C manage user sign-on?",
+      "pass": true,
+      "chunksRetrieved": 2,
+      "expectedProgramIds": [
+        "COSGN00C"
+      ],
+      "actualProgramIds": [
+        "COSGN00C"
+      ],
+      "programHit": true,
+      "keywordHits": [
+        "sign"
+      ],
+      "keywordTotal": 1,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 15.43,
+      "answerPreview": "The COSGN00C program manages user sign-on by processing user credentials, converting them to uppercase for consistency, and validating them against a user security file. It handles"
+    },
+    {
+      "id": "cbact01c-purpose",
+      "question": "What does the CBACT01C program do?",
+      "pass": true,
+      "chunksRetrieved": 5,
+      "expectedProgramIds": [
+        "CBACT01C"
+      ],
+      "actualProgramIds": [
+        "CBACT01C"
+      ],
+      "programHit": true,
+      "keywordHits": [],
+      "keywordTotal": 0,
+      "keywordRatio": 1.0,
+      "outOfScope": false,
+      "elapsedSeconds": 14.47,
+      "answerPreview": "The CBACT01C program is designed for batch processing within the banking domain, specifically to read account data from an indexed account file (ACCTFILE) and write this informatio"
+    }
+  ]
+}

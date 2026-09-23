@@ -22,6 +22,7 @@ import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
@@ -67,6 +68,8 @@ public class RagService {
     private final SecurityEventStore securityEventStore;
     private final SecurityPreFilter securityPreFilter;
     private final ChatMemoryService chatMemoryService;
+    private final RerankService rerankService;
+    private final int topK;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // Loads a prompt body from src/main/resources/prompts/ — kept as plain text
@@ -166,6 +169,10 @@ public class RagService {
     private static final String STARTER_SUGGESTIONS_SYSTEM_PROMPT =
             loadPrompt("starter-suggestions-system-prompt.md");
 
+    // ── HyDE query-expansion prompt (retrieval aid, see expandQuery) ──────────
+    private static final String HYDE_EXPANSION_SYSTEM_PROMPT =
+            loadPrompt("hyde-expansion-system-prompt.md");
+
     // ── Prompt-injection pre-check ─────────────────────────────────────────────
     // A separate, narrow, single-purpose classification call, run before the main
     // answer prompt is built. The main prompt's own Security Guidelines category 1
@@ -244,7 +251,9 @@ public class RagService {
                       RagMetrics metrics,
                       SecurityEventStore securityEventStore,
                       SecurityPreFilter securityPreFilter,
-                      ChatMemoryService chatMemoryService) {
+                      ChatMemoryService chatMemoryService,
+                      RerankService rerankService,
+                      @Value("${cobalt.rag.top-k:5}") int topK) {
         this.vectorSearch = vectorSearch;
         this.graphSearch  = graphSearch;
         this.impactAnalysisService = impactAnalysisService;
@@ -255,6 +264,41 @@ public class RagService {
         this.securityEventStore = securityEventStore;
         this.securityPreFilter = securityPreFilter;
         this.chatMemoryService = chatMemoryService;
+        this.rerankService = rerankService;
+        this.topK = topK;
+    }
+
+    /**
+     * Cheap, capped-output HyDE-style query expansion (see
+     * prompts/hyde-expansion-system-prompt.md): a short hypothetical answer to
+     * the question, plausible COBOL vocabulary and all, embedded ALONGSIDE the
+     * real question by VectorSearchService — often recovers matches a literal
+     * question-embedding alone misses, since a hypothetical answer's vocabulary
+     * is closer to how the target code chunks actually describe themselves.
+     * Never throws — a failure here just means retrieval falls back to
+     * question-only vector + keyword search, not a broken question.
+     */
+    private String expandQuery(String question) {
+        Timer.Sample sample = metrics.startLlmCall();
+        try {
+            var response = chatModel.call(new Prompt(List.of(
+                    new SystemMessage(HYDE_EXPANSION_SYSTEM_PROMPT), new UserMessage(question))));
+            return response.getResult().getOutput().getText();
+        } catch (Exception e) {
+            metrics.recordLlmCallError("hyde_expansion");
+            return null;
+        } finally {
+            metrics.stopLlmCall(sample, "hyde_expansion");
+        }
+    }
+
+    /** Retrieval pipeline shared by ask()/askStream(): HyDE-expand, hybrid
+     * search a widened candidate pool, rerank down to the final top-k actually
+     * used in the prompt. See VectorSearchService and RerankService. */
+    private List<ChunkResult> retrieve(String question) {
+        String hyde = expandQuery(question);
+        List<ChunkResult> candidates = vectorSearch.search(question, hyde);
+        return rerankService.rerank(question, candidates, topK);
     }
 
     /**
@@ -287,8 +331,10 @@ public class RagService {
                     List.of(), List.of(), null, List.of(), List.of(), null);
         }
 
-        // 1. Semantic search — retrieve top-K relevant code chunks from pgvector
-        List<ChunkResult> chunks = vectorSearch.search(question);
+        // 1. Retrieval: HyDE-expand, hybrid (vector + keyword) search a widened
+        // candidate pool, rerank down to the final chunks actually used — see
+        // retrieve()/VectorSearchService/RerankService.
+        List<ChunkResult> chunks = retrieve(question);
         metrics.recordChunksRetrieved(chunks.size());
 
         // 2. Extract program IDs and keywords for graph traversal
@@ -460,8 +506,9 @@ public class RagService {
             return Flux.just(toJson(metaPayload), toJson(tokenPayload), "[DONE]");
         }
 
-        // Synchronous RAG retrieval (DB calls are blocking, done before streaming starts)
-        List<ChunkResult> chunks = vectorSearch.search(question);
+        // Synchronous RAG retrieval (DB/LLM calls are blocking, done before streaming
+        // starts): HyDE-expand, hybrid search a widened pool, rerank down — see retrieve().
+        List<ChunkResult> chunks = retrieve(question);
         metrics.recordChunksRetrieved(chunks.size());
 
         List<String> programIds = chunks.stream()
