@@ -697,6 +697,19 @@ public class RagService {
             if (isSuppressedResponse(fullAnswer.toString(), !chunks.isEmpty())) {
                 return Flux.empty();
             }
+            // Same intent gate impactAnalysisMono itself applies internally — without
+            // this check here too, a purely descriptive question whose answer happens
+            // to name real fields (e.g. "what does surrender processing do?" naturally
+            // mentioning PMR-COVERAGE-AMOUNT, WS-SURRENDER-CHARGE, etc.) would make
+            // extractDiscussedFields non-empty and fall into the branch below, which
+            // calls impactAnalysisService.analyze(...) directly — bypassing the gate
+            // entirely and showing Impact Analysis for a question that never asked
+            // about a change. ask()'s equivalent narrowing step avoids this because it
+            // only runs when resolvedImpact is already non-null (i.e. the gate already
+            // passed); this streaming branch needs the same condition made explicit.
+            if (!looksLikeChangeRequest(question)) {
+                return Flux.empty();
+            }
             Set<String> fieldNames = extractDiscussedFields(chunks, fullAnswer.toString());
             Mono<ImpactAnalysis> resultMono = fieldNames.isEmpty()
                     ? impactAnalysisMono
