@@ -48,8 +48,8 @@ CREATE TABLE IF NOT EXISTS chunks (
     content               TEXT,
     payload               JSONB,
 
-    -- Vector embedding (text-embedding-3-small = 1536 dims)
-    embedding             vector(1536),
+    -- Vector embedding (text-embedding-3-large, native = 3072 dims)
+    embedding             vector(3072),
 
     created_at            TIMESTAMPTZ DEFAULT NOW()
 );
