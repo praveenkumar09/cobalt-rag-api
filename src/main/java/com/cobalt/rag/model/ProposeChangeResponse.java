@@ -9,10 +9,14 @@ import java.util.List;
  * one — shown in the UI regardless of response mode (see CodeChangeService's
  * Javadoc). {@code error} is non-null (and {@code proposedSource} null) only
  * when the agent could not produce a change at all — e.g. it couldn't
- * confidently locate which section of a large file to touch.
+ * confidently locate which section of a large file to touch. {@code
+ * businessSummary} is non-null only on success and only when one could be
+ * generated — a plain-English translation of the diff, shown in Business view
+ * in place of the raw COBOL (see CodeCompareModal.tsx).
  */
-public record ProposeChangeResponse(String programId, String proposedSource, String error, List<String> steps) {
-    public ProposeChangeResponse(String programId, String proposedSource, List<String> steps) {
-        this(programId, proposedSource, null, steps);
+public record ProposeChangeResponse(String programId, String proposedSource, String error, List<String> steps,
+                                     String businessSummary) {
+    public ProposeChangeResponse(String programId, String proposedSource, List<String> steps, String businessSummary) {
+        this(programId, proposedSource, null, steps, businessSummary);
     }
 }

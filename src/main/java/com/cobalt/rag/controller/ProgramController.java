@@ -54,9 +54,10 @@ public class ProgramController {
         }
         if (outcome.errorMessage() != null) {
             return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
-                    .body(new ProposeChangeResponse(programId, null, outcome.errorMessage(), outcome.steps()));
+                    .body(new ProposeChangeResponse(programId, null, outcome.errorMessage(), outcome.steps(), null));
         }
-        return ResponseEntity.ok(new ProposeChangeResponse(programId, outcome.proposedSource(), outcome.steps()));
+        return ResponseEntity.ok(new ProposeChangeResponse(
+                programId, outcome.proposedSource(), outcome.steps(), outcome.businessSummary()));
     }
 
     /**

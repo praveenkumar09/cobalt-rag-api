@@ -475,6 +475,99 @@ public class BusinessInsightService {
         return sb.toString();
     }
 
+    // Same "prose Markdown, printable document" shape as FUNCTIONAL_REQUIREMENT_
+    // SYSTEM_PROMPT above (backs TestScenarioReport.tsx, a sibling of
+    // FunctionalRequirementReport.tsx) — a business analyst / QA audience, not a
+    // structured UI list. Grounded ONLY in the business rules and decision table
+    // already extracted for this answer, same non-invention discipline as every
+    // other extraction prompt in this file.
+    private static final String TEST_SCENARIOS_SYSTEM_PROMPT = """
+            You write QA test scenarios for a business analyst / QA audience, grounded ONLY in \
+            the business rules and decision table already extracted for this question's answer \
+            — never invent behavior, fields, or conditions beyond them.
+
+            For each distinct business rule or decision table row, write one test case covering \
+            it being satisfied, and — where a decision table row has an exception — one \
+            additional test case covering that exception path. Aim to cover every supplied rule \
+            and decision table row at least once; don't pad with redundant or invented cases.
+
+            Respond as a Markdown document in exactly this structure:
+
+            ## Test Scenarios: <a short title derived from the question>
+
+            One short paragraph (1-2 sentences) stating what this test suite covers and how many \
+            scenarios it contains.
+
+            | # | Scenario | Preconditions | Test Steps | Expected Result | Related Rule |
+            |---|----------|---------------|------------|------------------|--------------|
+            | 1 | ... | ... | ... | ... | ... |
+
+            One row per test case, "Related Rule" naming which supplied business rule or decision \
+            table condition it validates, in plain language. If no business rules or decision \
+            table were supplied, write "No business rules or decision table were available to \
+            derive test scenarios from." instead of a table.
+
+            Respond with ONLY the Markdown — no commentary before or after, no code fence \
+            wrapping the whole document.
+            """;
+
+    /**
+     * Generates a QA test-scenario document for one chat question — the "Export
+     * Test Scenarios" action. Same grounding/no-fresh-retrieval discipline as
+     * {@link #generateFunctionalRequirement}, and the same throw-on-failure
+     * contract (a failed export should surface as an error, not a blank
+     * report) — deliberately NOT gated on decisionTable being non-empty here;
+     * that gating is a frontend-only UX decision (see MessageBubble.tsx's
+     * showTestScenarios) about when the button is worth showing at all, not a
+     * backend concern, since the prompt already handles an empty input honestly.
+     */
+    public String generateTestScenarios(String question, String answer,
+                                          List<BusinessRule> businessRules,
+                                          List<DecisionTableRow> decisionTable) {
+        Timer.Sample sample = metrics.startLlmCall();
+        try {
+            String userMessage = buildTestScenariosUserMessage(question, answer, businessRules, decisionTable);
+            var response = chatModel.call(new Prompt(List.of(
+                    new SystemMessage(TEST_SCENARIOS_SYSTEM_PROMPT), new UserMessage(userMessage))));
+            String text = response.getResult().getOutput().getText();
+            if (text == null || text.isBlank()) {
+                throw new IllegalStateException("Model returned empty test scenarios");
+            }
+            return text.trim();
+        } catch (Exception e) {
+            metrics.recordLlmCallError("test_scenarios");
+            throw e instanceof RuntimeException re ? re : new RuntimeException(e);
+        } finally {
+            metrics.stopLlmCall(sample, "test_scenarios");
+        }
+    }
+
+    private String buildTestScenariosUserMessage(String question, String answer,
+                                                    List<BusinessRule> businessRules,
+                                                    List<DecisionTableRow> decisionTable) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("ORIGINAL QUESTION:\n").append(question).append("\n\n");
+        sb.append("ANSWER ALREADY GIVEN:\n").append(answer).append("\n\n");
+        if (businessRules != null && !businessRules.isEmpty()) {
+            sb.append("BUSINESS RULES ALREADY EXTRACTED FOR THIS ANSWER:\n");
+            for (BusinessRule r : businessRules) {
+                sb.append("- ").append(r.rule()).append('\n');
+            }
+            sb.append('\n');
+        }
+        if (decisionTable != null && !decisionTable.isEmpty()) {
+            sb.append("DECISION TABLE ALREADY EXTRACTED FOR THIS ANSWER:\n");
+            for (DecisionTableRow row : decisionTable) {
+                sb.append("- WHEN ").append(row.condition()).append(" THEN ").append(row.outcome());
+                if (row.exception() != null && !row.exception().isBlank()) {
+                    sb.append(" (EXCEPTION: ").append(row.exception()).append(')');
+                }
+                sb.append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
     public BusinessFlow buildBusinessFlow(List<GraphRelationship> graphContext) {
         if (graphContext.isEmpty()) {
             return null;

@@ -5,6 +5,8 @@ import com.cobalt.rag.model.AskResponse;
 import com.cobalt.rag.model.FunctionalRequirementRequest;
 import com.cobalt.rag.model.FunctionalRequirementResponse;
 import com.cobalt.rag.model.SuggestionsResponse;
+import com.cobalt.rag.model.TestScenariosRequest;
+import com.cobalt.rag.model.TestScenariosResponse;
 import com.cobalt.rag.service.AskRateLimiter;
 import com.cobalt.rag.service.AuthStore;
 import com.cobalt.rag.service.RagMetrics;
@@ -214,6 +216,46 @@ public class RagController {
                     request.question(), request.answer(),
                     request.businessRules(), request.decisionTable(), request.dataDictionary());
             return ResponseEntity.ok(new FunctionalRequirementResponse(requirement));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    /**
+     * POST /api/test-scenarios  — "Export Test Scenarios"
+     *
+     * Generates a QA test-scenario document for one already-answered chat
+     * question, grounded in the question, its answer, and whatever business
+     * rules / decision table entries were already extracted for it — no fresh
+     * retrieval, same pattern as /api/functional-requirement. Available for a
+     * business-mode answer that actually has business rules or a decision
+     * table to derive test cases from (see MessageBubble.tsx's
+     * showTestScenarios).
+     *
+     * Postman setup:
+     *   Method  : POST
+     *   URL     : http://localhost:8083/api/test-scenarios
+     *   Headers : Content-Type: application/json
+     *   Body    : {
+     *     "question": "What if a claim is submitted on a lapsed policy?",
+     *     "answer": "<the answer text already shown in the chat>",
+     *     "businessRules": [{"rule": "...", "chunkId": "..."}],
+     *     "decisionTable": [{"condition": "...", "outcome": "...", "exception": null, "chunkId": "..."}]
+     *   }
+     *
+     * Response: { "scenarios": "## Test Scenarios: ...\n..." }  (Markdown)
+     */
+    @PostMapping(value = "/test-scenarios",
+            consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<TestScenariosResponse> testScenarios(@RequestBody TestScenariosRequest request) {
+        if (request.question() == null || request.question().isBlank()
+                || request.answer() == null || request.answer().isBlank()) {
+            return ResponseEntity.badRequest().build();
+        }
+        try {
+            String scenarios = ragService.generateTestScenarios(
+                    request.question(), request.answer(), request.businessRules(), request.decisionTable());
+            return ResponseEntity.ok(new TestScenariosResponse(scenarios));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }

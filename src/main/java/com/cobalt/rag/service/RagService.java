@@ -255,9 +255,15 @@ public class RagService {
     // LLM call when the question actually reads like a concrete "what if" —
     // ordinary questions never pay for it. Same cost-gating pattern as
     // CHANGE_REQUEST_WORD/looksLikeChangeRequest above.
+    // "\\bwalk\\s*-?\\s*(?:me|us)?\\s*-?\\s*through\\b" deliberately covers
+    // "walk through", "walk me/us through", AND "walkthrough" as one word (every
+    // \s*/-? piece can match zero characters) — a real question ("Walkthrough
+    // the scenario...") used the closed-compound form and the old literal
+    // "walk me through" phrase missed it entirely, silently never firing the
+    // Scenario Simulator for an otherwise clearly scenario-shaped question.
     private static final Pattern SCENARIO_QUESTION_PATTERN = Pattern.compile(
             "\\bwhat\\s+(if|happens|would happen)\\b|\\bsuppose\\b|\\blet'?s say\\b|" +
-            "\\bwalk me through\\b|\\bsimulate\\b",
+            "\\bwalk\\s*-?\\s*(?:me|us)?\\s*-?\\s*through\\b|\\bsimulate\\b",
             Pattern.CASE_INSENSITIVE
     );
 
@@ -363,6 +369,15 @@ public class RagService {
                                                   List<DataDictionaryEntry> dataDictionary) {
         return businessInsightService.generateFunctionalRequirement(
                 question, answer, businessRules, decisionTable, dataDictionary);
+    }
+
+    /** Backs the "Export Test Scenarios" action (see
+     * BusinessInsightService#generateTestScenarios) — same thin-passthrough,
+     * throw-on-failure pattern as generateFunctionalRequirement above. */
+    public String generateTestScenarios(String question, String answer,
+                                          List<BusinessRule> businessRules,
+                                          List<DecisionTableRow> decisionTable) {
+        return businessInsightService.generateTestScenarios(question, answer, businessRules, decisionTable);
     }
 
     public AskResponse ask(String question, String userId, String viewMode, String conversationId) {
