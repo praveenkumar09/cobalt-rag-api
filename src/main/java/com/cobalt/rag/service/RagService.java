@@ -228,7 +228,26 @@ public class RagService {
             "add(s|ed|ing)?|remov(e|es|ed|ing)|delet(e|es|ed|ing)|" +
             "refactor(s|ed|ing)?|renam(e|es|ed|ing)|replac(e|es|ed|ing)|" +
             "alter(s|ed|ing)?|extend(s|ed|ing)?|impact(s|ed|ing)?|" +
-            "migrat(e|es|ed|ing)|fix(es|ed|ing)?)\\b",
+            "migrat(e|es|ed|ing)|fix(es|ed|ing)?|skip(s|ped|ping)?)\\b",
+            Pattern.CASE_INSENSITIVE
+    );
+
+    // A question that OPENS with a purely explanatory lead-in ("How does X
+    // handle Y?", "What is the purpose of Z?") routinely uses a change-word as
+    // an ordinary noun/verb describing EXISTING behavior — "handle beneficiary
+    // updates" isn't a request to update anything — so CHANGE_REQUEST_WORD
+    // alone over-fires on it. looksLikeChangeRequest() suppresses that match
+    // unless the question also carries a stronger actionable cue (below):
+    // something genuinely hypothetical/directive, not just descriptive.
+    private static final Pattern DESCRIPTIVE_LEAD_IN = Pattern.compile(
+            "^\\s*(what\\s+(is|are|does|do)|how\\s+(is|are|does|do)|explain|describe|" +
+            "tell\\s+me\\s+about|what'?s\\s+the\\s+(purpose|functionality|role))\\b",
+            Pattern.CASE_INSENSITIVE
+    );
+
+    private static final Pattern STRONG_CHANGE_SIGNAL = Pattern.compile(
+            "\\bwhat\\s+if\\b|\\bshould\\s+we\\b|\\bcan\\s+we\\b|\\bif\\s+we\\b|" +
+            "\\bwe\\s+(want|need)\\s+to\\b|\\blet'?s\\b",
             Pattern.CASE_INSENSITIVE
     );
 
@@ -240,6 +259,21 @@ public class RagService {
             "\\bwhat\\s+(if|happens|would happen)\\b|\\bsuppose\\b|\\blet'?s say\\b|" +
             "\\bwalk me through\\b|\\bsimulate\\b",
             Pattern.CASE_INSENSITIVE
+    );
+
+    // COBOL field-name-shaped tokens (2+ hyphen-separated uppercase segments,
+    // e.g. WS-COI-RATE, PMR-COVERAGE-AMOUNT) found directly in the ANSWER text —
+    // see extractDiscussedFields. This is the primary signal now, not a
+    // secondary one: relying only on the retrieved chunks' own key_data_fields
+    // metadata (the original approach) silently misses fields the answer
+    // clearly names whenever the chunk that happens to carry that field in its
+    // metadata isn't among the handful of chunks retrieval picked as sources —
+    // increasingly likely the more chunks a program has. The answer text itself
+    // is the authoritative record of what it actually discussed; ImpactAnalysisService's
+    // own FIELD_EXISTS_QUERY is the safety net against a false-positive match
+    // (a capitalized non-field phrase) that isn't a real field anywhere.
+    private static final Pattern FIELD_NAME_TOKEN = Pattern.compile(
+            "\\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+){1,6}\\b"
     );
 
     public RagService(VectorSearchService vectorSearch,
@@ -313,6 +347,22 @@ public class RagService {
             return List.of();
         }
         return chatMemoryService.recentTurns(userId, conversationId);
+    }
+
+    /**
+     * Backs the "Export Functional Requirement Report" action (see
+     * BusinessInsightService#generateFunctionalRequirement) — a thin passthrough,
+     * same pattern as this service delegating to CodeChangeService for the
+     * propose-change flow, so RagController never talks to BusinessInsightService
+     * directly. Throws on failure (no silent empty result — see that method's
+     * Javadoc for why); RagController turns that into an error response.
+     */
+    public String generateFunctionalRequirement(String question, String answer,
+                                                  List<BusinessRule> businessRules,
+                                                  List<DecisionTableRow> decisionTable,
+                                                  List<DataDictionaryEntry> dataDictionary) {
+        return businessInsightService.generateFunctionalRequirement(
+                question, answer, businessRules, decisionTable, dataDictionary);
     }
 
     public AskResponse ask(String question, String userId, String viewMode, String conversationId) {
@@ -418,9 +468,11 @@ public class RagService {
                 }
             }
             // Now that the answer is known, narrow the (structural) impact result to
-            // the specific field(s) it actually discusses, if any were identified —
-            // falling back to the unfiltered result if nothing field-relevant is
-            // found (e.g. the field graph edges don't exist yet for this program).
+            // the specific field(s) it actually discusses, if any were identified.
+            // This is precise on purpose: analyze() returns just the seed tier (not
+            // null) when nothing field-relevant survives, so "narrowed to nothing"
+            // correctly replaces the broader unfiltered list here rather than being
+            // silently ignored in favor of it.
             if (!suppressExtras && resolvedImpact != null) {
                 Set<String> fieldNames = extractDiscussedFields(chunks, answer);
                 if (!fieldNames.isEmpty()) {
@@ -691,8 +743,12 @@ public class RagService {
         // instant by the time we get here rather than delaying the whole response.
         // Now that the answer is known, narrow it to the specific field(s) it
         // actually discusses, if any were identified — one extra, cheap, bounded
-        // Neo4j lookup on top of the already-computed unfiltered result, which it
-        // falls back to if nothing field-relevant is found.
+        // Neo4j lookup on top of the already-computed unfiltered result. The
+        // narrowed analyze() call is precise on purpose: when it finds nothing
+        // field-relevant, that's the real answer (nothing else genuinely needs
+        // this change), not a signal to fall back to the wider unfiltered list —
+        // switchIfEmpty below only ever fires on a genuine failure (analyze()
+        // throwing internally), as a resilience fallback, not a precision one.
         Flux<String> impactAnalysisFlux = Flux.defer(() -> {
             if (isSuppressedResponse(fullAnswer.toString(), !chunks.isEmpty())) {
                 return Flux.empty();
@@ -893,7 +949,15 @@ public class RagService {
     }
 
     private boolean looksLikeChangeRequest(String question) {
-        return question != null && CHANGE_REQUEST_WORD.matcher(question).find();
+        if (question == null || !CHANGE_REQUEST_WORD.matcher(question).find()) {
+            return false;
+        }
+        // "How does BNFUPD handle beneficiary updates?" matches "updates" as a
+        // plain noun, not a request — suppress unless a stronger cue is present.
+        if (DESCRIPTIVE_LEAD_IN.matcher(question).find() && !STRONG_CHANGE_SIGNAL.matcher(question).find()) {
+            return false;
+        }
+        return true;
     }
 
     private boolean looksLikeScenarioQuestion(String question) {
@@ -958,16 +1022,31 @@ public class RagService {
      * merely appeared in a retrieved-but-irrelevant chunk doesn't count.
      */
     private Set<String> extractDiscussedFields(List<ChunkResult> chunks, String answer) {
-        if (chunks == null || chunks.isEmpty() || answer == null || answer.isBlank()) {
+        if (answer == null || answer.isBlank()) {
             return Set.of();
         }
-        String lowerAnswer = answer.toLowerCase();
         Set<String> discussed = new LinkedHashSet<>();
-        for (ChunkResult chunk : chunks) {
-            if (chunk.keyDataFields() == null) continue;
-            for (String field : chunk.keyDataFields()) {
-                if (field != null && !field.isBlank() && lowerAnswer.contains(field.toLowerCase())) {
-                    discussed.add(field);
+
+        // Primary signal: field-name-shaped tokens the answer itself names
+        // directly — see FIELD_NAME_TOKEN's Javadoc for why this replaced
+        // relying solely on the retrieved chunks' key_data_fields below.
+        var matcher = FIELD_NAME_TOKEN.matcher(answer);
+        while (matcher.find()) {
+            discussed.add(matcher.group());
+        }
+
+        // Secondary: still worth keeping as a fallback for the rare case where a
+        // chunk's key_data_fields entry doesn't match the FIELD_NAME_TOKEN shape
+        // (e.g. contains characters the regex doesn't expect) but the answer
+        // clearly discusses it in lowercase prose instead of quoting it verbatim.
+        if (chunks != null && !chunks.isEmpty()) {
+            String lowerAnswer = answer.toLowerCase();
+            for (ChunkResult chunk : chunks) {
+                if (chunk.keyDataFields() == null) continue;
+                for (String field : chunk.keyDataFields()) {
+                    if (field != null && !field.isBlank() && lowerAnswer.contains(field.toLowerCase())) {
+                        discussed.add(field);
+                    }
                 }
             }
         }

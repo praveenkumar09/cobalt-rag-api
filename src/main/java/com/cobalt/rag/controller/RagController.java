@@ -2,6 +2,8 @@ package com.cobalt.rag.controller;
 
 import com.cobalt.rag.model.AskRequest;
 import com.cobalt.rag.model.AskResponse;
+import com.cobalt.rag.model.FunctionalRequirementRequest;
+import com.cobalt.rag.model.FunctionalRequirementResponse;
 import com.cobalt.rag.model.SuggestionsResponse;
 import com.cobalt.rag.service.AskRateLimiter;
 import com.cobalt.rag.service.AuthStore;
@@ -174,5 +176,46 @@ public class RagController {
     @GetMapping("/health")
     public ResponseEntity<Map<String, String>> health() {
         return ResponseEntity.ok(Map.of("status", "UP", "service", "cobalt-rag-api"));
+    }
+
+    /**
+     * POST /api/functional-requirement  — "Export Functional Requirement Report"
+     *
+     * Generates a formal functional requirement document for one already-answered
+     * chat question, grounded in the question, its answer, and whatever business
+     * rules / decision table / data dictionary entries were already extracted for
+     * it — no fresh retrieval, unlike {@code /ask}. Available for every business-mode
+     * answer (see MessageBubble.tsx), unlike the scenario-only Change Impact Report.
+     *
+     * Postman setup:
+     *   Method  : POST
+     *   URL     : http://localhost:8083/api/functional-requirement
+     *   Headers : Content-Type: application/json
+     *   Body    : {
+     *     "question": "What is the functionality of claims processing?",
+     *     "answer": "<the answer text already shown in the chat>",
+     *     "businessRules": [{"rule": "...", "chunkId": "..."}],
+     *     "decisionTable": [{"condition": "...", "outcome": "...", "exception": null, "chunkId": "..."}],
+     *     "dataDictionary": [{"term": "...", "technicalName": "...", "description": "...", "chunkId": "..."}]
+     *   }
+     *
+     * Response: { "requirement": "## Overview\n..." }  (Markdown)
+     */
+    @PostMapping(value = "/functional-requirement",
+            consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<FunctionalRequirementResponse> functionalRequirement(
+            @RequestBody FunctionalRequirementRequest request) {
+        if (request.question() == null || request.question().isBlank()
+                || request.answer() == null || request.answer().isBlank()) {
+            return ResponseEntity.badRequest().build();
+        }
+        try {
+            String requirement = ragService.generateFunctionalRequirement(
+                    request.question(), request.answer(),
+                    request.businessRules(), request.decisionTable(), request.dataDictionary());
+            return ResponseEntity.ok(new FunctionalRequirementResponse(requirement));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 }

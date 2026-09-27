@@ -75,15 +75,32 @@ public class VectorSearchService {
             LIMIT ?
             """;
 
-    // Chunk rows are contiguous and gapless per program (the ingestor's chunker
-    // closes each chunk exactly where the next one starts), so every chunk for a
-    // program — not just the embedded/should_embed ones — ordered by line_start
-    // reconstructs the complete original file, never a fabricated approximation.
+    // Chunk rows are NOT always gapless-and-non-overlapping in practice — the
+    // ingestor's merge-time coverage-gap-fill logic can leave a large raw
+    // fallback chunk (covering a whole failed/retried window) sitting alongside
+    // the smaller chunks that DID get analyzed for that same line range (both
+    // are real, correctly-ranged rows — see fetchFullSource's overlap-skipping
+    // logic below, which is what actually keeps the reconstruction correct now).
+    // line_start/line_end are selected so that skipping can happen precisely.
+    // The program's individual sections, kept SEPARATE (unlike fetchFullSource's
+    // concatenation) — backs CodeChangeService's chunk-scoped "locate the
+    // relevant section(s), then generate just those" proposed-change flow, so a
+    // huge file never has to go through an LLM in one piece. section_purpose is
+    // the ingestor's own natural-language description of what each section
+    // does — cheap to hand to an LLM for "which section is relevant" (scales
+    // with section COUNT, not file size) instead of full content for every one.
+    private static final String CHUNKS_FOR_PROGRAM_SQL = """
+            SELECT chunk_id, section_name, section_purpose, content, line_start, line_end
+            FROM chunks
+            WHERE program_id = ? AND content IS NOT NULL AND content <> ''
+            ORDER BY line_start NULLS LAST, line_end NULLS LAST
+            """;
+
     private static final String FULL_SOURCE_SQL = """
-            SELECT source_file, content
+            SELECT source_file, content, line_start, line_end
             FROM chunks
             WHERE program_id = ?
-            ORDER BY line_start NULLS LAST
+            ORDER BY line_start NULLS LAST, line_end NULLS LAST
             """;
 
     // Random sample of real, already-ingested programs/sections — used to ground
@@ -227,21 +244,84 @@ public class VectorSearchService {
         );
     }
 
+    /**
+     * One row of {@link #FULL_SOURCE_SQL}: a chunk's raw content plus the line
+     * range it claims to cover (either may be null for older/edge-case rows
+     * that predate line tracking).
+     */
+    private record SourceChunkRow(String sourceFile, String content, Integer lineStart, Integer lineEnd) {
+    }
+
+    /** The program's sections, individually — see {@link #CHUNKS_FOR_PROGRAM_SQL}. */
+    public List<ChunkResult> fetchChunksForProgram(String programId) {
+        return jdbc.query(CHUNKS_FOR_PROGRAM_SQL, (rs, rowNum) -> new ChunkResult(
+                rs.getString("chunk_id"),
+                null, programId, null, null,
+                rs.getString("section_name"),
+                rs.getString("section_purpose"),
+                rs.getString("content"),
+                null,
+                nullableInt(rs, "line_start"),
+                nullableInt(rs, "line_end"),
+                0.0,
+                null
+        ), programId);
+    }
+
     public Optional<ProgramSource> fetchFullSource(String programId) {
-        List<Object[]> rows = jdbc.query(
+        List<SourceChunkRow> rows = jdbc.query(
                 FULL_SOURCE_SQL,
-                (rs, rowNum) -> new Object[]{rs.getString("source_file"), rs.getString("content")},
+                (rs, rowNum) -> new SourceChunkRow(
+                        rs.getString("source_file"), rs.getString("content"),
+                        nullableInt(rs, "line_start"), nullableInt(rs, "line_end")),
                 programId
         );
         if (rows.isEmpty()) {
             return Optional.empty();
         }
-        String sourceFile = (String) rows.get(0)[0];
-        String content = rows.stream()
-                .map(row -> (String) row[1])
-                .reduce((a, b) -> a + "\n" + b)
-                .orElse("");
-        return Optional.of(new ProgramSource(programId, sourceFile, content));
+        String sourceFile = rows.get(0).sourceFile();
+        return Optional.of(new ProgramSource(programId, sourceFile, reconstructSource(rows)));
+    }
+
+    /**
+     * Concatenates chunk content in line order, skipping any portion already
+     * covered by an earlier (or wider) chunk — rows are ordered by line_start,
+     * but can genuinely overlap in range (see FULL_SOURCE_SQL's comment), and
+     * naively concatenating every row's content regardless produced large
+     * duplicated blocks in the "Current" panel of the code-compare view for
+     * any program whose ingestion needed a coverage-gap fallback. Tracks the
+     * highest line number already emitted and, for each subsequent chunk,
+     * only appends the lines of its content that fall after that point —
+     * correct as long as a chunk's own line count matches its claimed
+     * (lineEnd - lineStart + 1), which holds for real ingested content even
+     * when ranges between DIFFERENT chunks overlap.
+     */
+    private String reconstructSource(List<SourceChunkRow> rows) {
+        StringBuilder sb = new StringBuilder();
+        int nextLineNeeded = 1;
+        for (SourceChunkRow row : rows) {
+            String content = row.content();
+            if (content == null) continue;
+            Integer lineStart = row.lineStart();
+            Integer lineEnd = row.lineEnd();
+            if (lineStart == null || lineEnd == null || lineEnd < nextLineNeeded) {
+                // No line metadata to dedupe against (append as-is — rare), or
+                // this whole chunk is already covered by what's been emitted.
+                if (lineStart == null || lineEnd == null) {
+                    if (!sb.isEmpty()) sb.append('\n');
+                    sb.append(content);
+                }
+                continue;
+            }
+            String[] chunkLines = content.split("\n", -1);
+            int skip = Math.max(0, nextLineNeeded - lineStart);
+            for (int i = skip; i < chunkLines.length; i++) {
+                if (!sb.isEmpty()) sb.append('\n');
+                sb.append(chunkLines[i]);
+            }
+            nextLineNeeded = Math.max(nextLineNeeded, lineEnd + 1);
+        }
+        return sb.toString();
     }
 
     /**

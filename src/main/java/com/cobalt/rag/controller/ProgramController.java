@@ -4,6 +4,7 @@ import com.cobalt.rag.model.ProgramSource;
 import com.cobalt.rag.model.ProposeChangeRequest;
 import com.cobalt.rag.model.ProposeChangeResponse;
 import com.cobalt.rag.service.CodeChangeService;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -35,26 +36,38 @@ public class ProgramController {
      * POST /api/programs/{programId}/propose-change
      *
      * Generates a modified version of the program's real source, grounded in
-     * the original question/answer that recommended the change. 404 if the
-     * program has no ingested source to ground the proposal against.
+     * the original question/answer that recommended the change — agentically,
+     * via locate/generate/splice, for a file too large to send whole (see
+     * {@link CodeChangeService}'s Javadoc). 404 if the program has no ingested
+     * source to ground the proposal against; 422 (with a specific message in
+     * the body, plus the {@code steps} the agent took before giving up) if the
+     * agent could not confidently produce a change at all.
      */
     @PostMapping(value = "/{programId}/propose-change",
             consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<ProposeChangeResponse> proposeChange(
             @PathVariable String programId,
             @RequestBody ProposeChangeRequest request) {
-        return codeChangeService.proposeChange(programId, request.question(), request.answer())
-                .map(proposed -> ResponseEntity.ok(new ProposeChangeResponse(programId, proposed)))
-                .orElseGet(() -> ResponseEntity.notFound().build());
+        var outcome = codeChangeService.proposeChange(programId, request.question(), request.answer());
+        if (outcome.notFound()) {
+            return ResponseEntity.notFound().build();
+        }
+        if (outcome.errorMessage() != null) {
+            return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                    .body(new ProposeChangeResponse(programId, null, outcome.errorMessage(), outcome.steps()));
+        }
+        return ResponseEntity.ok(new ProposeChangeResponse(programId, outcome.proposedSource(), outcome.steps()));
     }
 
     /**
      * POST /api/programs/{programId}/propose-change/stream  — SSE variant, used
-     * when the user's response-mode setting is "Live". Same event shape as
-     * {@code /api/ask}: {@code data: {"type":"token","content":"..."}} frames
-     * followed by {@code data: [DONE]}; a program with no ingested source emits
-     * a single {@code {"type":"error", ...}} frame instead (an SSE stream can't
-     * change its HTTP status once it has started).
+     * when the user's response-mode setting is "Live". Event frames:
+     * {@code {"type":"thinking","message":"..."}} (zero or more, as the agent's
+     * locate/generate/splice steps happen), then exactly one of
+     * {@code {"type":"result","proposedSource":"..."}} or
+     * {@code {"type":"error","message":"..."}}, followed by {@code [DONE]} (an
+     * SSE stream can't change its HTTP status once it has started, so a
+     * not-found program is also just an error frame here).
      */
     @PostMapping(value = "/{programId}/propose-change/stream",
             consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.TEXT_EVENT_STREAM_VALUE)

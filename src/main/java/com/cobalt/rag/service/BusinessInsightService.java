@@ -51,8 +51,19 @@ public class BusinessInsightService {
             copybook's field/status definitions) may itself describe things that sound \
             rule-like. For a structural/relational question like that, respond with an empty \
             array — do not extract unrelated rules just because the surrounding code happens \
-            to define some. Only extract when the question or answer is actually about what \
-            the system decides, permits, rejects, or requires.
+            to define some.
+
+            A broad "what does X do" / "what is the functionality of X" overview question is \
+            NOT automatically structural — judge it by what the ANSWER actually describes, not \
+            by how open-ended the question sounds. If the answer describes the program \
+            approving, rejecting, categorizing, validating, or applying a threshold/limit to \
+            something (e.g. "claims are auto-approved or sent for review based on the approved \
+            amount"), that IS decision behavior — extract the underlying rule(s) even though \
+            the question itself never used a word like "decide" or "reject". Only skip \
+            extraction when the answer is genuinely just describing file I/O, structure, or \
+            process flow with no approve/reject/threshold/eligibility decision anywhere in it. \
+            Only extract when the question or answer is actually about what the system \
+            decides, permits, rejects, or requires.
             """;
 
     private static final String CHUNK_REFERENCE_INSTRUCTION = """
@@ -175,6 +186,49 @@ public class BusinessInsightService {
             these four keys, no markdown fences, no commentary. Example:
             [{"term":"Claim Amount","technicalName":"CLM-AMOUNT","description":"The total monetary amount being claimed for a specific incident.","chunkId":"CLMREC.cpy#01-CLAIM-RECORD"}]
             """).formatted(CHUNK_REFERENCE_INSTRUCTION);
+
+    // Deliberately prose Markdown, not JSON — this backs "Export Functional
+    // Requirement Report", a printable document (see FunctionalRequirementReport.tsx
+    // on the frontend), not a structured UI list like the extraction prompts above.
+    private static final String FUNCTIONAL_REQUIREMENT_SYSTEM_PROMPT = """
+            You write a formal functional requirement document for a business analyst / \
+            requirements-traceability audience. You are given the user's ORIGINAL QUESTION, \
+            the ANSWER already given to it, and whatever business rules, decision table rows, \
+            and data-dictionary entries were already extracted for that same answer. Ground \
+            the document ONLY in what these describe — never invent behavior, fields, or \
+            rules beyond them.
+
+            Structure the document in exactly this order, using Markdown headings:
+
+            ## Overview
+            One short paragraph stating what capability this requirement covers.
+
+            ## Functional Description
+            A clear, complete description of what the system does — expand on the answer in \
+            full prose, don't just repeat it verbatim.
+
+            ## Business Rules
+            A numbered list of formal "The system shall..." statements, one per rule, derived \
+            from the supplied business rules / decision table. If none were supplied, write \
+            "No explicit business rules were identified for this functionality." rather than \
+            inventing any.
+
+            ## Data Elements
+            A Markdown table with columns Term | Technical Name | Description, one row per \
+            supplied data-dictionary entry. If none were supplied, write "No specific data \
+            elements were identified for this functionality." instead of a table.
+
+            ## Acceptance Criteria
+            A numbered list of specific, testable Given/When/Then criteria derived from the \
+            business rules and decision table above.
+
+            ## Assumptions and Dependencies
+            Any assumptions or dependencies implied by the answer (e.g. on other programs, \
+            files, or upstream data), or "None identified." if there are none.
+
+            Respond with ONLY the Markdown document — no commentary before or after, and no \
+            code fence wrapping the whole document.
+            """;
 
     private static final String FLOW_POLISH_SYSTEM_PROMPT = """
             You are given the EXACT, real business-activity flow of a system, as a JSON array \
@@ -344,6 +398,81 @@ public class BusinessInsightService {
         } finally {
             metrics.stopLlmCall(sample, "data_dictionary");
         }
+    }
+
+    /**
+     * Generates a formal functional requirement document for one chat question —
+     * the "Export Functional Requirement Report" action, available on every
+     * business-mode answer (unlike the scenario-only Change Impact Report). Grounded
+     * in the question, the answer already given, and whatever business rules/decision
+     * table/data dictionary entries were already extracted for that same answer — no
+     * fresh retrieval, since those structured fields are themselves grounded in the
+     * original retrieval and are sufficient here. Unlike the other extraction methods
+     * above, this returns prose Markdown (a document), not a JSON array, so callers
+     * that need an error signal (this can throw) rather than a silent empty result —
+     * a failed *export* action should tell the user it failed, not quietly produce a
+     * blank report.
+     */
+    public String generateFunctionalRequirement(String question, String answer,
+                                                  List<BusinessRule> businessRules,
+                                                  List<DecisionTableRow> decisionTable,
+                                                  List<DataDictionaryEntry> dataDictionary) {
+        Timer.Sample sample = metrics.startLlmCall();
+        try {
+            String userMessage = buildFunctionalRequirementUserMessage(
+                    question, answer, businessRules, decisionTable, dataDictionary);
+            var response = chatModel.call(new Prompt(List.of(
+                    new SystemMessage(FUNCTIONAL_REQUIREMENT_SYSTEM_PROMPT), new UserMessage(userMessage))));
+            String text = response.getResult().getOutput().getText();
+            if (text == null || text.isBlank()) {
+                throw new IllegalStateException("Model returned an empty functional requirement");
+            }
+            return text.trim();
+        } catch (Exception e) {
+            metrics.recordLlmCallError("functional_requirement");
+            throw e instanceof RuntimeException re ? re : new RuntimeException(e);
+        } finally {
+            metrics.stopLlmCall(sample, "functional_requirement");
+        }
+    }
+
+    private String buildFunctionalRequirementUserMessage(String question, String answer,
+                                                           List<BusinessRule> businessRules,
+                                                           List<DecisionTableRow> decisionTable,
+                                                           List<DataDictionaryEntry> dataDictionary) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("ORIGINAL QUESTION:\n").append(question).append("\n\n");
+        sb.append("ANSWER ALREADY GIVEN:\n").append(answer).append("\n\n");
+
+        if (businessRules != null && !businessRules.isEmpty()) {
+            sb.append("BUSINESS RULES ALREADY EXTRACTED FOR THIS ANSWER:\n");
+            for (BusinessRule r : businessRules) {
+                sb.append("- ").append(r.rule()).append('\n');
+            }
+            sb.append('\n');
+        }
+        if (decisionTable != null && !decisionTable.isEmpty()) {
+            sb.append("DECISION TABLE ALREADY EXTRACTED FOR THIS ANSWER:\n");
+            for (DecisionTableRow row : decisionTable) {
+                sb.append("- WHEN ").append(row.condition()).append(" THEN ").append(row.outcome());
+                if (row.exception() != null && !row.exception().isBlank()) {
+                    sb.append(" (EXCEPTION: ").append(row.exception()).append(')');
+                }
+                sb.append('\n');
+            }
+            sb.append('\n');
+        }
+        if (dataDictionary != null && !dataDictionary.isEmpty()) {
+            sb.append("DATA ELEMENTS ALREADY EXTRACTED FOR THIS ANSWER:\n");
+            for (DataDictionaryEntry d : dataDictionary) {
+                sb.append("- ").append(d.term());
+                if (d.technicalName() != null && !d.technicalName().isBlank()) {
+                    sb.append(" (").append(d.technicalName()).append(')');
+                }
+                sb.append(": ").append(d.description()).append('\n');
+            }
+        }
+        return sb.toString();
     }
 
     public BusinessFlow buildBusinessFlow(List<GraphRelationship> graphContext) {

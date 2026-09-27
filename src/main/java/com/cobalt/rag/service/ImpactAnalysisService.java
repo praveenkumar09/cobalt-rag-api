@@ -74,6 +74,19 @@ public class ImpactAnalysisService {
             RETURN DISTINCT n.id AS id
             """;
 
+    // Whether the discussed field(s) exist as FIELD nodes AT ALL — distinct from
+    // FIELD_RELEVANT_QUERY finding no REFERENCING programs. A brand-new field
+    // ("add a new field to X") legitimately has zero DEFINES/REFERENCES edges
+    // anywhere yet, so narrowing by reference is meaningless for it: see the
+    // "new field" branch in analyze() below, which falls back to structural
+    // reachability (which copybook + which programs COPY it) instead of
+    // narrowing to nothing, specifically for this case.
+    private static final String FIELD_EXISTS_QUERY = """
+            MATCH (f:FIELD)
+            WHERE f.id IN $fieldIds
+            RETURN DISTINCT f.id AS id
+            """;
+
     private final Driver driver;
 
     public ImpactAnalysisService(Driver driver) {
@@ -93,10 +106,16 @@ public class ImpactAnalysisService {
      * and their own copybooks (tier 0) are always kept regardless of the field
      * filter, since the program you asked about is trivially "impacted."
      *
-     * Returns null if nothing survives the filter — the caller should treat that
-     * as "fall back to the unfiltered result," not "there is truly no impact":
-     * this can also mean the field name didn't match anything yet (e.g. the
-     * ingestor hasn't been re-run since the field was added to the source).
+     * This is deliberately precise, not broad: a program that merely shares a
+     * copybook with the seed but never touches the specific field(s) the change
+     * discusses is NOT included, even though it's structurally reachable. When
+     * the field filter narrows everything away, that's the real answer ("nothing
+     * else genuinely needs this change") — the result is the seed tier alone,
+     * not a silent fallback to the wider structural list.
+     *
+     * Returns null only when {@code fieldNames} is empty AND there's no
+     * structural reachability either — genuinely nothing to show, field-level or
+     * otherwise.
      */
     public ImpactAnalysis analyze(List<String> seedProgramIds, Set<String> fieldNames) {
         if (seedProgramIds == null || seedProgramIds.isEmpty()) {
@@ -126,6 +145,21 @@ public class ImpactAnalysisService {
                     .map(f -> f.trim().toUpperCase())
                     .collect(Collectors.toSet());
 
+            if (!fieldIds.isEmpty()) {
+                var existingFields = session.run(FIELD_EXISTS_QUERY, Map.of("fieldIds", List.copyOf(fieldIds))).list();
+                if (existingFields.isEmpty()) {
+                    // None of the discussed field(s) exist as FIELD nodes anywhere yet —
+                    // a new-field scenario. Reference-based narrowing can't say anything
+                    // useful about a field nothing has ever DEFINED or REFERENCED, so
+                    // treat this the same as "no field filter": show the full structural
+                    // reachability (the copybook the seed copies, and every program that
+                    // in turn copies THAT copybook) — those are exactly the files that
+                    // would need reviewing for a genuinely new field, even though none of
+                    // them reference it (yet, by definition).
+                    fieldIds = Set.of();
+                }
+            }
+
             if (!fieldIds.isEmpty() && !candidates.isEmpty()) {
                 var relevant = session.run(FIELD_RELEVANT_QUERY,
                         Map.of("candidateIds", List.copyOf(candidates.keySet()), "fieldIds", List.copyOf(fieldIds))
@@ -138,9 +172,18 @@ public class ImpactAnalysisService {
             candidates.forEach(nodesById::putIfAbsent);
 
             if (nodesById.size() <= rootIds.size()) {
-                // Nothing beyond the change target itself — no impact to show
-                // (or, with a field filter applied, nothing field-relevant survived).
-                return null;
+                if (fieldIds.isEmpty()) {
+                    // No field filter was even applied, and there's no structural
+                    // reachability either — genuinely nothing to show.
+                    return null;
+                }
+                // A field filter WAS applied and narrowed every structurally-reachable
+                // candidate away. That IS the real, precise answer — "no other file in
+                // the system actually references these specific fields" — not a reason
+                // to fall back to the broader copybook-sharing/caller list (which is
+                // what returning null used to trigger upstream, via switchIfEmpty).
+                // Fall through and return just the seed tier, so the UI still confirms
+                // what change-relevant scope was actually checked.
             }
 
             Set<String> allIds = nodesById.keySet();
